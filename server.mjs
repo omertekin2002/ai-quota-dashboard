@@ -22,6 +22,15 @@ const HOME = os.homedir();
 const PORT = Number(process.env.PORT || 7417);
 const AUTH_DIR = expand(process.env.CLIPROXY_AUTH_DIR || '~/.cli-proxy-api');
 const CODEX_HOME = expand(process.env.CODEX_HOME || '~/.codex');
+// Extra Host names to answer to, e.g. the MagicDNS name when published with `tailscale serve`.
+const ALLOWED_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  ...(process.env.ALLOWED_HOSTS || '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase().replace(/\.$/, ''))
+    .filter(Boolean),
+]);
 const TTL_MS = 90_000; // normal polling: at most one upstream round per 90s
 const FORCE_MIN_MS = 15_000; // manual refresh: at most one per 15s
 const PROFILE_TTL_MS = 6 * 3600_000;
@@ -363,9 +372,9 @@ if (process.argv.includes('--json')) {
 }
 
 const server = http.createServer(async (req, res) => {
-  // Only answer requests addressed to localhost, so other websites can't read this via DNS rebinding.
-  const host = (req.headers.host || '').replace(/:\d+$/, '');
-  if (host !== 'localhost' && host !== '127.0.0.1') {
+  // Only answer requests addressed to known hosts, so other websites can't read this via DNS rebinding.
+  const host = (req.headers.host || '').replace(/:\d+$/, '').toLowerCase();
+  if (!ALLOWED_HOSTS.has(host)) {
     res.writeHead(403).end();
     return;
   }

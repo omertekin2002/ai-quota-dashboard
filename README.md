@@ -34,11 +34,22 @@ CLIProxyAPI is optional. The dashboard only reads its auth folder (`~/.cli-proxy
 
 Usage numbers come from `api.anthropic.com/api/oauth/usage` and `chatgpt.com/backend-api/wham/usage`. These are the same endpoints the Claude Code and Codex apps call. They're unofficial and may change.
 
+## Running on another machine via Tailscale
+
+On Linux, the Claude login is read from `~/.claude/.credentials.json`; the Codex and CLIProxyAPI files are the same as on macOS. To reach the dashboard from your other tailnet devices:
+
+```sh
+tailscale serve --bg 7417     # https://<machine>.<tailnet>.ts.net → 127.0.0.1:7417, tailnet-only, persists across reboots
+ALLOWED_HOSTS=<machine>.<tailnet>.ts.net npm start
+```
+
+`tailscale serve` passes the MagicDNS name through as the `Host` header, so that name has to be in `ALLOWED_HOSTS`. Use `serve`, not `funnel`; `funnel` would put the dashboard on the public internet.
+
 ## Notes
 
 - **Tokens are never refreshed or written back.** Both providers' refresh tokens are one-time-use, so refreshing them here would log the CLIs out. When a token has expired, the card shows the last successful reading, marked as old, until you run `claude` or `codex` once.
 - The last successful reading is stored in `.cache/last-good.json`. It holds usage numbers and emails only, no tokens.
-- The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1`. That stops other websites from reading it through DNS rebinding.
+- The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1` or listed in `ALLOWED_HOSTS`. That stops other websites from reading it through DNS rebinding.
 - Upstream calls are cached for 90 seconds. Pressing **Refresh** bypasses the cache, at most once every 15 seconds.
 
 | Env var | Default |
@@ -46,3 +57,4 @@ Usage numbers come from `api.anthropic.com/api/oauth/usage` and `chatgpt.com/bac
 | `PORT` | `7417` |
 | `CLIPROXY_AUTH_DIR` | `~/.cli-proxy-api` |
 | `CODEX_HOME` | `~/.codex` |
+| `ALLOWED_HOSTS` | (empty) — comma-separated extra hostnames to accept, e.g. your Tailscale MagicDNS name |
