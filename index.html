@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quotas</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink-1: #0b0b0b;
+    --ink-2: #52514e;
+    --ink-muted: #898781;
+    --hairline: #e1e0d9;
+    --border: rgba(11, 11, 11, 0.10);
+    --fill: #2a78d6;
+    --warning: #fab219;
+    --critical: #d03b3b;
+    --warning-ink: #8a5a00;
+    --critical-ink: #b02a2a;
+    --claude: #c96442;
+    --openai: #0b0b0b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --ink-1: #f0efec;
+      --ink-2: #c3c2b7;
+      --ink-muted: #898781;
+      --hairline: #2c2c2a;
+      --border: rgba(255, 255, 255, 0.10);
+      --fill: #3987e5;
+      --warning-ink: #fab219;
+      --critical-ink: #e66767;
+      --claude: #d97757;
+      --openai: #f0efec;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink-1);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1120px; margin: 0 auto; padding: 32px 24px 48px; }
+
+  .top { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 24px; }
+  .top h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
+  .top .meta { color: var(--ink-muted); font-size: 13px; margin-top: 2px; }
+  .top .actions { margin-left: auto; display: flex; gap: 8px; }
+  button {
+    font: inherit; font-size: 13px; color: var(--ink-1); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--ink-muted); }
+  button[aria-pressed="true"] { background: var(--hairline); }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .banner { border: 1px solid var(--border); border-left: 3px solid var(--critical); background: var(--surface);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; color: var(--ink-2); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px 6px; }
+  .card-head { display: flex; align-items: center; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--hairline); }
+  .mono { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; flex: none;
+    font-weight: 700; font-size: 13px; color: var(--surface); }
+  .mono.claude { background: var(--claude); }
+  .mono.openai { background: var(--openai); }
+  .who { min-width: 0; }
+  .who .name { font-weight: 650; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .plan { font-size: 11px; font-weight: 600; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+  .who .sub { color: var(--ink-muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fresh { margin-left: auto; font-size: 12px; color: var(--ink-muted); white-space: nowrap; }
+  .fresh.stale { color: var(--warning-ink); }
+  .card-error { color: var(--ink-2); font-size: 13px; padding: 12px 0; }
+  .card-error code, .empty code { font-size: 12px; background: var(--hairline); padding: 1px 5px; border-radius: 4px; }
+
+  .win { padding: 14px 0; border-bottom: 1px solid var(--hairline); outline: none; border-radius: 4px; }
+  .win:last-child { border-bottom: 0; }
+  .win:focus-visible { box-shadow: 0 0 0 2px var(--fill); }
+  .win-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .win-label { font-weight: 600; color: var(--ink-2); font-size: 13px; }
+  .win-reset { color: var(--ink-muted); font-size: 12.5px; white-space: nowrap; }
+  .win-main { display: flex; align-items: baseline; gap: 6px; margin: 4px 0 8px; }
+  .big { font-size: 34px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.05; }
+  .big-unit { color: var(--ink-muted); font-size: 13px; }
+  .status { margin-left: auto; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+  .status.warning { color: var(--warning-ink); }
+  .status.critical { color: var(--critical-ink); }
+
+  .meter { --c: var(--fill); position: relative; height: 8px; border-radius: 4px;
+    background: color-mix(in oklab, var(--c) 20%, var(--surface)); }
+  .meter.warning { --c: var(--warning); }
+  .meter.critical { --c: var(--critical); }
+  .meter .fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--c); }
+  .meter .pace { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px;
+    background: var(--ink-1); box-shadow: 0 0 0 2px var(--surface); }
+  .win-foot { margin-top: 8px; font-size: 12.5px; color: var(--ink-muted); min-height: 17px; }
+  .win-foot.warn { color: var(--warning-ink); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--hairline); font-size: 13px; }
+  th { color: var(--ink-muted); font-weight: 600; font-size: 12px; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  th.num { text-align: right; }
+  tr:last-child td { border-bottom: 0; }
+
+  .legend { margin-top: 20px; color: var(--ink-muted); font-size: 12px; display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+  .legend .key { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 18px; height: 6px; border-radius: 3px; background: var(--fill); }
+  .legend .tick { width: 2px; height: 12px; background: var(--ink-1); border-radius: 1px; }
+  .empty { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; color: var(--ink-2); }
+
+  #tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink-1);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.5;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.18); max-width: 280px; display: none; }
+  #tip .k { color: var(--ink-muted); }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div>
+      <h1>Quotas</h1>
+      <div class="meta" id="meta">Loading…</div>
+    </div>
+    <div class="actions">
+      <button id="view" aria-pressed="false">Table</button>
+      <button id="refresh">Refresh</button>
+    </div>
+  </div>
+  <div id="banner"></div>
+  <div id="content"></div>
+  <div class="legend" id="legend" hidden>
+    <span class="key"><span class="swatch"></span>Quota left</span>
+    <span class="key"><span class="tick"></span>Time left in the window. A bar that ends left of the tick means you're using it faster than it resets.</span>
+  </div>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let data = null;
+  let tableView = false;
+  let loading = false;
+  let reloadTimer = null;
+
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  function fmtDur(sec) {
+    sec = Math.max(0, Math.round(sec));
+    const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+    if (d) return h ? `${d}d ${h}h` : `${d}d`;
+    if (h) return m ? `${h}h ${m}m` : `${h}h`;
+    return m ? `${m}m` : '<1m';
+  }
+  function fmtClock(ms) {
+    const t = new Date(ms), now = new Date();
+    const time = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (t.toDateString() === now.toDateString()) return time;
+    if (ms - now < 6 * 86400e3) return `${t.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+    return t.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+  const fmtFull = (ms) => new Date(ms).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  function fmtWindow(sec) {
+    if (!sec) return 'n/a';
+    if (sec % 86400 === 0) return `${sec / 86400} day${sec === 86400 ? '' : 's'}`;
+    return `${+(sec / 3600).toFixed(1)} hours`;
+  }
+  const ago = (ms) => (Date.now() - ms < 60e3 ? 'just now' : `${fmtDur((Date.now() - ms) / 1000)} ago`);
+
+  // Derive everything the UI shows about one window at the current moment.
+  function view(w, now) {
+    let used = w.usedPct;
+    let resetPassed = false;
+    if (w.resetsAt && w.resetsAt <= now) { used = 0; resetPassed = true; }
+    const left = Math.max(0, Math.min(100, 100 - used));
+    const toReset = w.resetsAt && !resetPassed ? (w.resetsAt - now) / 1000 : null;
+    const notStarted = !resetPassed && used <= 0 && toReset != null && w.windowSec && toReset >= w.windowSec - 120;
+    let timeLeftPct = null, projectedLeft = null, runsOutIn = null;
+    if (toReset != null && w.windowSec && !notStarted) {
+      timeLeftPct = Math.max(0, Math.min(100, (toReset / w.windowSec) * 100));
+      const elapsed = w.windowSec - toReset;
+      if (used > 0 && elapsed > w.windowSec * 0.02) {
+        const rate = used / elapsed;
+        const proj = left - rate * toReset;
+        if (proj < 0) runsOutIn = left / rate; else projectedLeft = proj;
+      }
+    }
+    const level = left <= 10 ? 'critical' : left <= 30 ? 'warning' : null;
+    return { used, left, toReset, notStarted, resetPassed, timeLeftPct, projectedLeft, runsOutIn, level };
+  }
+
+  function statusLabel(v) {
+    if (v.left <= 0) return { cls: 'critical', text: '⛔ Limit reached' };
+    if (v.level === 'critical') return { cls: 'critical', text: '⛔ Nearly out' };
+    if (v.level === 'warning') return { cls: 'warning', text: '⚠ Low' };
+    return null;
+  }
+
+  function resetText(w, v) {
+    if (v.resetPassed) return 'reset since last reading';
+    if (v.notStarted) return 'starts on first use';
+    if (v.toReset == null) return w.windowSec ? '' : 'resets with billing cycle';
+    return `resets in ${fmtDur(v.toReset)} · ${fmtClock(w.resetsAt)}`;
+  }
+
+  function footText(v) {
+    if (v.resetPassed) return { text: 'Estimated. Refreshing…' };
+    if (v.notStarted) return { text: 'Unused. The window starts when you send your first request.' };
+    if (v.runsOutIn != null) return { text: `⚠ At this pace it runs out in ${fmtDur(v.runsOutIn)}, before the reset`, warn: true };
+    if (v.projectedLeft != null) return { text: `At this pace, about ${Math.round(v.projectedLeft)}% left at reset` };
+    return { text: '' };
+  }
+
+  function tipHtml(a, w, v) {
+    const rows = [
+      [`${a.name} ${a.plan || ''}`.trim(), w.label],
+      ['Left', `${Math.round(v.left)}%`],
+      ['Used', `${Math.round(v.used)}%`],
+      ['Window', fmtWindow(w.windowSec)],
+    ];
+    if (w.resetsAt && !v.notStarted) rows.push(['Resets', fmtFull(w.resetsAt)]);
+    if (v.timeLeftPct != null) rows.push(['Time left', `${Math.round(v.timeLeftPct)}% of window`]);
+    if (a.stale) rows.push(['Reading', `from ${ago(a.fetchedAt)}`]);
+    return rows.map(([k, val]) => `<div><span class="k">${esc(k)}:</span> ${esc(val)}</div>`).join('');
+  }
+
+  function renderWindow(a, w, now, ai, wi) {
+    const v = view(w, now);
+    const st = statusLabel(v);
+    const foot = footText(v);
+    const aria = `${w.label}: ${Math.round(v.left)} percent left, ${resetText(w, v)}`;
+    return `
+      <div class="win" tabindex="0" data-a="${ai}" data-w="${wi}" aria-label="${esc(aria)}">
+        <div class="win-top"><span class="win-label">${esc(w.label)}</span><span class="win-reset">${esc(resetText(w, v))}</span></div>
+        <div class="win-main">
+          <span class="big">${Math.round(v.left)}%</span><span class="big-unit">left</span>
+          ${st ? `<span class="status ${st.cls}">${st.text}</span>` : ''}
+        </div>
+        <div class="meter ${v.level || ''}" aria-hidden="true">
+          <div class="fill" style="width:${v.left}%"></div>
+          ${v.timeLeftPct != null ? `<div class="pace" style="left:${v.timeLeftPct}%"></div>` : ''}
+        </div>
+        <div class="win-foot ${foot.warn ? 'warn' : ''}">${esc(foot.text)}</div>
+      </div>`;
+  }
+
+  function renderCard(a, now, ai) {
+    const mono = a.provider === 'claude' ? '✳' : '◎';
+    const sub = a.email || '';
+    const via = `Read from ${a.sources?.join(' + ') || 'n/a'}`;
+    const fresh = a.stale
+      ? `<span class="fresh stale" title="${esc(`${a.error} ${via}`)}">◷ ${esc(ago(a.fetchedAt))}</span>`
+      : a.error ? '' : `<span class="fresh" title="${esc(via)}">● Live</span>`;
+    const body = a.windows?.length
+      ? a.windows.map((w, wi) => renderWindow(a, w, now, ai, wi)).join('')
+      : '';
+    const err = a.error ? `<div class="card-error">${a.stale ? 'Showing the last reading. ' : ''}${md(a.error)}</div>` : '';
+    return `
+      <article class="card">
+        <header class="card-head">
+          <div class="mono ${a.provider}" aria-hidden="true">${mono}</div>
+          <div class="who">
+            <div class="name">${esc(a.name)}${a.plan ? `<span class="plan">${esc(a.plan)}</span>` : ''}</div>
+            <div class="sub" title="${esc(sub)}">${esc(sub)}</div>
+          </div>
+          ${fresh}
+        </header>
+        ${a.stale ? err : ''}${body}${a.stale ? '' : err}
+      </article>`;
+  }
+
+  function renderTable(now) {
+    const rows = data.accounts.flatMap((a) =>
+      (a.windows || []).map((w) => {
+        const v = view(w, now);
+        const st = statusLabel(v);
+        return `<tr>
+          <td>${esc(a.name)} ${esc(a.plan || '')}<br><span style="color:var(--ink-muted)">${esc(a.email || '')}</span></td>
+          <td>${esc(w.label)}</td>
+          <td class="num">${Math.round(v.left)}%</td>
+          <td class="num">${Math.round(v.used)}%</td>
+          <td>${esc(resetText(w, v) || '–')}</td>
+          <td>${st ? esc(st.text) : 'OK'}${a.stale ? ` (reading from ${esc(ago(a.fetchedAt))})` : ''}</td>
+        </tr>`;
+      }),
+    );
+    return `<table>
+      <thead><tr><th>Account</th><th>Window</th><th class="num">Left</th><th class="num">Used</th><th>Reset</th><th>Status</th></tr></thead>
+      <tbody>${rows.join('')}</tbody></table>`;
+  }
+
+  function render() {
+    if (!data) return;
+    const now = Date.now();
+    $('meta').textContent = `Claude & ChatGPT · updated ${ago(data.generatedAt)}`;
+    if (!data.accounts.length) {
+      $('content').innerHTML = `<div class="empty">No Claude or ChatGPT logins found. Sign in with <code>claude</code> or <code>codex</code>, or add accounts to CLIProxyAPI (<code>~/.cli-proxy-api</code>).</div>`;
+      $('legend').hidden = true;
+      return;
+    }
+    $('content').innerHTML = tableView
+      ? renderTable(now)
+      : `<div class="grid">${data.accounts.map((a, ai) => renderCard(a, now, ai)).join('')}</div>`;
+    $('legend').hidden = tableView;
+
+    // Tab title: the tightest window per account, e.g. "25% · 95%".
+    const tight = data.accounts.filter((a) => a.windows?.length).map((a) => Math.round(Math.min(...a.windows.map((w) => view(w, now).left))));
+    document.title = tight.length ? `${tight.map((n) => `${n}%`).join(' · ')} · Quotas` : 'Quotas';
+
+    // Once a live window passes its reset time, fetch fresh numbers shortly after.
+    const passed = data.accounts.some((a) => !a.stale && a.windows?.some((w) => w.resetsAt && w.resetsAt <= now));
+    if (passed && !reloadTimer) reloadTimer = setTimeout(() => { reloadTimer = null; load(true); }, 20_000);
+  }
+
+  async function load(force = false) {
+    if (loading) return;
+    loading = true;
+    $('refresh').disabled = true;
+    try {
+      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json();
+      $('banner').innerHTML = '';
+    } catch (err) {
+      $('banner').innerHTML = `<div class="banner">Can't reach the quota server (${esc(err.message)}). Is <code>node server.mjs</code> running?</div>`;
+    } finally {
+      loading = false;
+      $('refresh').disabled = false;
+      render();
+    }
+  }
+
+  // Hover / focus tooltip with exact numbers.
+  const tip = $('tip');
+  function showTip(el, x, y) {
+    const a = data.accounts[+el.dataset.a], w = a.windows[+el.dataset.w];
+    tip.innerHTML = tipHtml(a, w, view(w, Date.now()));
+    tip.style.display = 'block';
+    const r = tip.getBoundingClientRect();
+    tip.style.left = `${Math.min(x + 14, innerWidth - r.width - 8)}px`;
+    tip.style.top = `${Math.min(y + 14, innerHeight - r.height - 8)}px`;
+  }
+  document.addEventListener('pointermove', (e) => {
+    const el = e.target.closest?.('.win');
+    if (el) showTip(el, e.clientX, e.clientY); else tip.style.display = 'none';
+  });
+  document.addEventListener('focusin', (e) => {
+    const el = e.target.closest?.('.win');
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    showTip(el, r.left + 20, r.bottom - 10);
+  });
+  document.addEventListener('focusout', () => (tip.style.display = 'none'));
+
+  $('refresh').onclick = () => load(true);
+  $('view').onclick = () => {
+    tableView = !tableView;
+    $('view').setAttribute('aria-pressed', tableView);
+    render();
+  };
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && load());
+
+  load();
+  setInterval(load, 120_000);
+  setInterval(render, 15_000);
+</script>
+</body>
+</html>
