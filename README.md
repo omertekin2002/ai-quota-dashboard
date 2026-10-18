@@ -50,7 +50,7 @@ ALLOWED_HOSTS=<machine>.<tailnet>.ts.net npm start
 - **Tokens are never refreshed or written back.** Both providers' refresh tokens are one-time-use, so refreshing them here would log the CLIs out. When a token has expired, the card shows the last successful reading, marked as old, until you run `claude` or `codex` once.
 - The last successful reading is stored in `.cache/last-good.json`. It holds usage numbers and emails only, no tokens.
 - The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1` or listed in `ALLOWED_HOSTS`. That stops other websites from reading it through DNS rebinding.
-- Upstream calls are cached for 90 seconds. Pressing **Refresh** bypasses the cache, at most once every 15 seconds.
+- Upstream calls are cached for 90 seconds, and the Claude plan lookup for 15 minutes. Pressing **Refresh** bypasses both, at most once every 15 seconds.
 
 | Env var | Default |
 |---|---|

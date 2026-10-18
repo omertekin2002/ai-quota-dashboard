@@ -33,7 +33,7 @@ const ALLOWED_HOSTS = new Set([
 ]);
 const TTL_MS = 90_000; // normal polling: at most one upstream round per 90s
 const FORCE_MIN_MS = 15_000; // manual refresh: at most one per 15s
-const PROFILE_TTL_MS = 6 * 3600_000;
+const PROFILE_TTL_MS = 15 * 60_000; // plan lookup: re-checked this often, and on every manual refresh
 const LAST_GOOD_FILE = path.join(HERE, '.cache', 'last-good.json');
 
 function expand(p) {
@@ -169,13 +169,14 @@ const claudeHeaders = (token) => ({
 });
 
 const profileCache = new Map();
-async function claudeProfile(cred) {
+async function claudeProfile(cred, force) {
   const key = hash(cred.token);
   const hit = profileCache.get(key);
-  if (hit && Date.now() - hit.at < PROFILE_TTL_MS) return hit.profile;
+  if (hit && !force && Date.now() - hit.at < PROFILE_TTL_MS) return hit.profile;
   const profile = await getJson('https://api.anthropic.com/api/oauth/profile', claudeHeaders(cred.token)).catch(() => null);
   if (profile) profileCache.set(key, { at: Date.now(), profile });
-  return profile;
+  // A failed re-check keeps the last answer instead of dropping to the plan saved at login.
+  return profile ?? hit?.profile ?? null;
 }
 
 function claudePlan(profile, fallback) {
@@ -211,11 +212,11 @@ function claudeWindows(u) {
   return windows;
 }
 
-async function fetchClaude() {
+async function fetchClaude(force) {
   const creds = claudeCredentials();
   // Identify each token's account (email) so the same login from two sources shows once.
   for (const c of creds) {
-    const p = await claudeProfile(c);
+    const p = await claudeProfile(c, force);
     c.profile = p;
     c.email = p?.account?.email || c.email;
   }
@@ -332,9 +333,9 @@ function saveLastGood() {
   fs.writeFileSync(LAST_GOOD_FILE, JSON.stringify(lastGood, null, 1));
 }
 
-async function collect() {
+async function collect(force) {
   const now = Date.now();
-  const settled = await Promise.allSettled([fetchClaude(), fetchCodex()]);
+  const settled = await Promise.allSettled([fetchClaude(force), fetchCodex()]);
   const accounts = settled.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
   let changed = false;
   for (const a of accounts) {
@@ -358,7 +359,7 @@ let inflight = null;
 async function getQuotas(force) {
   const age = cache ? Date.now() - cache.generatedAt : Infinity;
   if (cache && age < (force ? FORCE_MIN_MS : TTL_MS)) return cache;
-  inflight ??= collect()
+  inflight ??= collect(force)
     .then((r) => (cache = r))
     .finally(() => (inflight = null));
   return inflight;
