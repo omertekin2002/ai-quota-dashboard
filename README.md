@@ -11,7 +11,7 @@ npm run json         # print current quotas as JSON and exit
 
 ## What it shows
 
-For each account and limit window:
+For each account and limit window, including model-specific ones such as Claude's Fable-only weekly limit when your plan has one:
 
 - how much is left, as a % with a meter
 - a countdown to the reset and the reset time

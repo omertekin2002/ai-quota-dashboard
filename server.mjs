@@ -190,6 +190,8 @@ function claudePlan(profile, fallback) {
   return titleCase(fallback) || null;
 }
 
+const LIMIT_GROUPS = { session: ['5-hour', 5 * 3600], weekly: ['Weekly', 7 * 86400] };
+
 function claudeWindows(u) {
   const defs = [
     ['five_hour', '5-hour', 5 * 3600],
@@ -206,6 +208,23 @@ function claudeWindows(u) {
       resetsAt: toMs(u[key].resets_at),
       windowSec,
     }));
+  // Limits for a single model (e.g. Fable's own weekly cap) only appear in the newer `limits` list.
+  (u.limits || []).forEach((l, i) => {
+    const model = l.scope?.model?.display_name;
+    if (!model) return;
+    const [group, windowSec] = LIMIT_GROUPS[l.group] || [titleCase(l.group), null];
+    const label = [group, model].filter(Boolean).join(' · ');
+    if (windows.some((w) => w.label === label)) return;
+    const share = u.weekly_scoped_shares?.find((s) => s.limit_index === i);
+    windows.push({
+      id: [l.group, model].filter(Boolean).join('_').toLowerCase().replace(/\W+/g, '_'),
+      label,
+      usedPct: l.percent ?? 0,
+      resetsAt: toMs(l.resets_at),
+      windowSec,
+      shareOfWeeklyPct: share?.allowance_percent_of_weekly ?? null,
+    });
+  });
   if (u.extra_usage?.is_enabled && typeof u.extra_usage.utilization === 'number') {
     windows.push({ id: 'extra_usage', label: 'Extra usage · monthly', usedPct: u.extra_usage.utilization, resetsAt: null, windowSec: null });
   }

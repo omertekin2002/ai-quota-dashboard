@@ -225,6 +225,7 @@
       ['Used', `${Math.round(v.used)}%`],
       ['Window', fmtWindow(w.windowSec)],
     ];
+    if (w.shareOfWeeklyPct != null) rows.push(['Allowance', `${w.shareOfWeeklyPct}% of the weekly limit`]);
     if (w.resetsAt && !v.notStarted) rows.push(['Resets', fmtFull(w.resetsAt)]);
     if (v.timeLeftPct != null) rows.push(['Time left', `${Math.round(v.timeLeftPct)}% of window`]);
     if (a.stale) rows.push(['Reading', `from ${ago(a.fetchedAt)}`]);
