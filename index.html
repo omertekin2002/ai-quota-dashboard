@@ -20,6 +20,7 @@
     --critical: #d03b3b;
     --warning-ink: #8a5a00;
     --critical-ink: #b02a2a;
+    --healthy: #247345;
     --claude: #c96442;
     --openai: #0b0b0b;
   }
@@ -36,11 +37,13 @@
       --fill: #3987e5;
       --warning-ink: #fab219;
       --critical-ink: #e66767;
+      --healthy: #6fcf97;
       --claude: #d97757;
       --openai: #f0efec;
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     background: var(--page);
@@ -64,7 +67,7 @@
   .banner { border: 1px solid var(--border); border-left: 3px solid var(--critical); background: var(--surface);
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; color: var(--ink-2); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); gap: 16px; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px 6px; }
   .card-head { display: flex; align-items: center; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--hairline); }
   .mono { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; flex: none;
@@ -109,6 +112,81 @@
   td.num { font-variant-numeric: tabular-nums; text-align: right; }
   th.num { text-align: right; }
   tr:last-child td { border-bottom: 0; }
+  .table-scroll { overflow-x: auto; }
+
+  .workspace { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 24px; }
+  .workspace-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+  .workspace h2 { margin: 0; font-size: 16px; font-weight: 650; }
+  .workspace-meta, .workspace-note { color: var(--ink-muted); font-size: 12px; }
+  .workspace-note { margin: 12px 0 0; }
+  .workspace-note.warning { color: var(--warning-ink); }
+  .machine-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 18px 0; }
+  .machine-metric { min-width: 0; }
+  .metric-label { font-size: 12px; color: var(--ink-2); font-weight: 600; }
+  .metric-value { font-size: 28px; line-height: 1.2; font-weight: 650; letter-spacing: -0.02em; margin: 4px 0 6px; }
+  .metric-value.warning { color: var(--warning-ink); }
+  .metric-value.critical { color: var(--critical-ink); }
+  .metric-value.healthy { color: var(--healthy); }
+  .metric-detail { font-size: 12px; color: var(--ink-muted); overflow-wrap: anywhere; }
+  .machine-metric .meter { margin-top: 9px; height: 5px; }
+  .services { list-style: none; margin: 0; padding: 14px 0 0; border-top: 1px solid var(--hairline);
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 16px; }
+  .service-name { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+  .service-state { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 3px; color: var(--ink-muted); }
+  .service-state.healthy { color: var(--healthy); }
+  .service-state.warning { color: var(--warning-ink); }
+  .service-state.critical { color: var(--critical-ink); }
+  .health-dot { height: 6px; width: 6px; background: currentColor; border-radius: 50%; flex: none; }
+  .health-check { font-size: 11.5px; color: var(--ink-muted); margin-top: 4px; overflow-wrap: anywhere; }
+  .health-check.healthy, .diagnostic-status.healthy { color: var(--healthy); }
+  .health-check.warning, .diagnostic-status.warning { color: var(--warning-ink); }
+  .health-check.critical, .diagnostic-status.critical { color: var(--critical-ink); }
+  .service-meta { color: var(--ink-muted); font-size: 11px; margin-top: 5px; }
+  .diagnostics { margin-top: 28px; }
+  .diagnostics-heading { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
+  .diagnostics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .diagnostic-card { min-width: 0; padding: 18px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+  .diagnostic-card h3 { font-size: 14px; margin: 0 0 12px; font-weight: 650; }
+  .workflow-card { grid-column: 1 / -1; }
+  .workflow-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin-bottom: 12px; }
+  .workflow-summary .diagnostic-detail { margin: 0; }
+  .workflow-jobs { margin-top: 16px; }
+  .workflow-jobs h4 { font-size: 12.5px; margin: 0 0 8px; font-weight: 600; }
+  .workflow-process-table th, .workflow-process-table td { padding: 8px 10px; font-size: 12px; }
+  .workflow-process-table .process-description { display: block; color: var(--ink-muted); font-size: 11px; margin-top: 2px; }
+  .diagnostic-status { font-size: 12.5px; font-weight: 600; }
+  .diagnostic-detail { color: var(--ink-muted); font-size: 12px; margin: 5px 0 12px; overflow-wrap: anywhere; }
+  .pressure-readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 16px; }
+  .pressure-readings span { display: block; font-size: 12px; color: var(--ink-muted); }
+  .pressure-readings strong { display: block; font-size: 18px; font-weight: 600; }
+  .diagnostic-list { padding: 0; margin: 0; list-style: none; }
+  .process-row, .diagnostic-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 7px 0; font-size: 12px; border-top: 1px solid var(--hairline); }
+  .process-row .process-name { min-width: 0; overflow-wrap: anywhere; }
+  .process-row .process-memory { white-space: nowrap; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .disk { margin: 12px 0 18px; }
+  .disk .meter { height: 5px; margin-top: 8px; }
+  .disk .diagnostic-detail { margin-bottom: 0; }
+  .latency-chart { display: block; width: 100%; height: 62px; color: var(--fill); margin: 8px 0; }
+  .latency-chart .failed-sample { fill: var(--critical); }
+  .event-row { display: grid; grid-template-columns: 6px minmax(0, 1fr); column-gap: 9px; padding: 7px 0; border-top: 1px solid var(--hairline); }
+  .event-row .health-dot { margin-top: 5px; background: var(--fill); }
+  .event-row.warning .health-dot { background: var(--warning); }
+  .event-row.critical .health-dot { background: var(--critical); }
+  .event-title { font-size: 12px; overflow-wrap: anywhere; }
+  .event-time { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-muted); }
+  @media (max-width: 700px) {
+    .machine-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 16px; }
+    .diagnostics-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 420px) {
+    main { padding: 24px 16px 32px; }
+    .top { flex-wrap: wrap; }
+    .top .actions { margin-left: 0; }
+    .workspace, .card { padding-left: 16px; padding-right: 16px; }
+    .services { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .win-top { flex-wrap: wrap; gap: 2px 8px; }
+    .who .name { flex-wrap: wrap; gap: 3px 6px; }
+  }
 
   .legend { margin-top: 20px; color: var(--ink-muted); font-size: 12px; display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
   .legend .key { display: inline-flex; align-items: center; gap: 6px; }
@@ -134,12 +212,21 @@
       <button id="refresh">Refresh</button>
     </div>
   </div>
+  <section class="workspace" aria-labelledby="workspace-title">
+    <div class="workspace-head">
+      <h2 id="workspace-title">Workspace computer</h2>
+      <div class="workspace-meta" id="workspace-meta">Checking laptop…</div>
+    </div>
+    <div id="workspace-content"><p class="workspace-note">Loading computer status…</p></div>
+    <p class="workspace-note" id="workspace-error" role="status" hidden></p>
+  </section>
   <div id="banner"></div>
   <div id="content"></div>
   <div class="legend" id="legend" hidden>
     <span class="key"><span class="swatch"></span>Quota left</span>
     <span class="key"><span class="tick"></span>Time left in the window. A bar that ends left of the tick means you're using it faster than it resets.</span>
   </div>
+  <section class="diagnostics" id="workspace-diagnostics" aria-label="Computer diagnostics" hidden></section>
 </main>
 <div id="tip" role="tooltip"></div>
 <script>
@@ -148,6 +235,9 @@
   let tableView = false;
   let loading = false;
   let reloadTimer = null;
+  let workspace = null;
+  let workspaceLoading = false;
+  let workspaceError = false;
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -173,6 +263,198 @@
     return `${+(sec / 3600).toFixed(1)} hours`;
   }
   const ago = (ms) => (Date.now() - ms < 60e3 ? 'just now' : `${fmtDur((Date.now() - ms) / 1000)} ago`);
+
+  const gib = (bytes) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+
+  function machineMetric(label, value, detail, level = '', percent = null) {
+    return `<div class="machine-metric">
+      <div class="metric-label">${esc(label)}</div>
+      <div class="metric-value ${level}">${esc(value)}</div>
+      <div class="metric-detail">${esc(detail)}</div>
+      ${percent != null ? `<div class="meter ${level}" aria-hidden="true"><div class="fill" style="width:${Math.max(0, Math.min(100, percent))}%"></div></div>` : ''}
+    </div>`;
+  }
+
+  function renderWorkspace() {
+    const stale = workspaceError || (workspace && Date.now() - workspace.generatedAt > 90_000);
+    $('workspace-error').hidden = !stale;
+    $('workspace-error').className = 'workspace-note warning';
+    $('workspace-error').textContent = workspaceError
+      ? `Can't update computer status.${workspace ? ' Showing the last reading.' : ' Retrying every 30 seconds.'}`
+      : 'Computer readings are old. Waiting for an update…';
+    if (!workspace) {
+      if (workspaceError) {
+        $('workspace-meta').textContent = 'Unavailable';
+        $('workspace-content').innerHTML = '';
+      }
+      return;
+    }
+    if (!workspace.supported) {
+      $('workspace-diagnostics').hidden = true;
+      $('workspace-meta').textContent = '';
+      $('workspace-content').innerHTML = '<p class="workspace-note">Computer monitoring is available on Linux.</p>';
+      return;
+    }
+    $('workspace-meta').textContent = `${workspace.model} · up ${fmtDur(workspace.uptimeSec)} · checked ${ago(workspace.generatedAt)}`;
+    const battery = workspace.power.batteries[0];
+    const ac = workspace.power.acOnline;
+    const onBattery = ac === false || battery?.status === 'Discharging';
+    const powerDetail = [ac === true ? 'Plugged in' : ac === false ? 'On battery' : 'Power source unknown', battery?.status].filter(Boolean).join(' · ');
+    const batteryLevel = onBattery && battery?.percent != null ? (battery.percent <= 10 ? 'critical' : battery.percent <= 30 ? 'warning' : '') : '';
+    const sensor = workspace.temperatures.find((s) => s.name === 'CPU') || workspace.temperatures[0];
+    const tempLevel = sensor?.criticalCelsius != null
+      ? (sensor.celsius >= sensor.criticalCelsius ? 'critical' : sensor.celsius >= sensor.criticalCelsius - 10 ? 'warning' : '') : '';
+    const tempDetail = sensor
+      ? [sensor.name, ...workspace.temperatures.filter((s) => s !== sensor).map((s) => `${s.name} ${Math.round(s.celsius)}°C`)].join(' · ')
+      : 'No readable temperature sensors';
+    const memory = workspace.memory;
+    const memoryLevel = ['warning', 'critical'].includes(workspace.diagnostics?.memoryLevel) ? workspace.diagnostics.memoryLevel : '';
+    const net = workspace.internet;
+    const netLabels = { online: 'Online', limited: 'Limited', portal: 'Sign-in needed', offline: 'Offline', unknown: 'Unknown' };
+    const netDetails = { online: `Internet reachable · ${net.latencyMs} ms`, limited: 'HTTPS checks failed; network connected', portal: 'Network sign-in may be required', offline: 'No internet connection detected', unknown: 'Could not verify internet access' };
+    const networkName = net.networkName ? `${net.networkType === 'wifi' ? 'Wi-Fi' : 'Ethernet'}: ${net.networkName}` : '';
+    const internetDetail = [networkName, net.signalPct != null ? `${net.signalPct}% signal` : '', netDetails[net.state] || netDetails.unknown].filter(Boolean).join(' · ');
+    const metrics = [
+      machineMetric('Battery', battery?.percent != null ? `${Math.round(battery.percent)}%` : '—', battery ? powerDetail : 'No readable battery', batteryLevel, battery?.percent),
+      machineMetric('Temperature', sensor ? `${Math.round(sensor.celsius)}°C` : '—', tempDetail, tempLevel),
+      machineMetric('Memory', memory ? `${Math.round(memory.usedPct)}%` : '—', memory ? `${gib(memory.usedBytes)} / ${gib(memory.totalBytes)} used${memory.swapUsedBytes != null ? ` · ${gib(memory.swapUsedBytes)} swap` : ''}` : 'Memory reading unavailable', memoryLevel, memory?.usedPct),
+      machineMetric('Internet', netLabels[net.state] || 'Unknown', internetDetail, net.state === 'online' ? 'healthy' : net.state === 'offline' ? 'critical' : 'warning'),
+    ];
+    const stateLabels = { running: 'Running', stopped: 'Stopped', failed: 'Failed', 'not-found': 'Not installed', unknown: 'Unknown', activating: 'Starting', deactivating: 'Stopping', reloading: 'Reloading', exited: 'Exited' };
+    const services = workspace.services.map((s) => {
+      const serviceChecks = (workspace.diagnostics?.healthChecks || []).filter((c) => c.service === s.unit);
+      const failedCheck = serviceChecks.some((c) => c.state === 'unhealthy');
+      const level = failedCheck ? 'critical' : s.state === 'running' ? 'healthy' : ['failed', 'stopped'].includes(s.state) ? 'critical' : 'warning';
+      const checks = serviceChecks.map((c) => {
+        const state = c.state === 'healthy' ? 'healthy' : c.state === 'unhealthy' ? 'critical' : 'warning';
+        const detail = c.state === 'healthy' ? `OK${c.latencyMs != null ? ` · ${c.latencyMs} ms` : ''}` : c.detail;
+        return `<div class="health-check ${state}" title="${esc(`Checked ${ago(c.checkedAt)}`)}">${esc(c.label)}: ${esc(detail)}${c.id === 'ngrok-public' ? ` · ${esc(ago(c.checkedAt))}` : ''}</div>`;
+      }).join('');
+      const restarts = s.automaticRestarts != null ? `<div class="service-meta">${s.automaticRestarts} auto restarts${s.startedAt ? ` · up ${esc(fmtDur((Date.now() - s.startedAt) / 1000))}` : ''}</div>` : '';
+      return `<li><div class="service-name">${esc(s.name)}</div><div class="service-state ${level}"><span class="health-dot" aria-hidden="true"></span>${esc(stateLabels[s.state] || s.state)}${failedCheck && s.state === 'running' ? ' · Check failed' : ''}</div>${checks}${restarts}</li>`;
+    }).join('');
+    $('workspace-content').innerHTML = `<div class="machine-metrics">${metrics.join('')}</div><ul class="services" aria-label="Services">${services}</ul>`;
+    renderDiagnostics();
+  }
+
+  const mib = (bytes) => bytes >= 1024 ** 3 ? gib(bytes) : `${Math.round(bytes / 1024 ** 2)} MiB`;
+
+  function renderLatency(samples) {
+    if (!samples.length) return '<p class="diagnostic-detail">Collecting connection history…</p>';
+    const first = samples[0].timestamp, last = samples.at(-1).timestamp;
+    const max = Math.max(100, ...samples.filter((s) => s.latencyMs != null).map((s) => s.latencyMs));
+    let previous = null;
+    const parts = samples.map((s) => {
+      const x = 6 + (s.timestamp - first) / Math.max(30_000, last - first) * 288;
+      if (s.state !== 'online' || s.latencyMs == null) {
+        previous = null;
+        return `<circle class="failed-sample" cx="${x}" cy="53" r="3"/>`;
+      }
+      const y = 53 - Math.min(1, s.latencyMs / max) * 45;
+      const segment = previous ? `<line x1="${previous.x}" y1="${previous.y}" x2="${x}" y2="${y}" stroke="currentColor" stroke-width="1.5"/>` : '';
+      previous = { x, y };
+      return `${segment}<circle cx="${x}" cy="${y}" r="2" fill="currentColor"/>`;
+    }).join('');
+    const failures = samples.filter((s) => s.state !== 'online').length;
+    const successful = samples.filter((s) => s.state === 'online' && s.latencyMs != null).map((s) => s.latencyMs);
+    const range = successful.length ? `${Math.min(...successful)}–${Math.max(...successful)} ms` : 'No successful checks';
+    return `<svg class="latency-chart" viewBox="0 0 300 62" role="img" aria-label="Internet check response times; red dots indicate unsuccessful checks">${parts}</svg>
+      <div class="diagnostic-detail">${esc(range)} · ${failures} of ${samples.length} internet checks unsuccessful · since ${esc(fmtClock(first))}. Up to 30 minutes shown.</div>`;
+  }
+
+  function renderDiagnostics() {
+    const target = $('workspace-diagnostics'), d = workspace?.diagnostics;
+    target.hidden = !workspace?.supported || !d;
+    if (target.hidden) return;
+    const history = workspace.history;
+    const pressureLabels = { healthy: 'Memory has headroom', warning: 'Memory needs attention', critical: 'Memory under pressure', unknown: 'Memory pressure unavailable' };
+    const pressure = ['cpu', 'memory', 'io'].map((name) => {
+      const value = d.pressure[name]?.some?.avg10;
+      return `<div><span>${{ cpu: 'CPU wait', memory: 'Memory stalls', io: 'I/O wait' }[name]}</span><strong>${value != null ? `${value.toFixed(1)}%` : '—'}</strong></div>`;
+    }).join('');
+    const processes = d.topProcesses.map((p) => `<li class="process-row"><span class="process-name">${esc(p.name)} <span class="workspace-meta">#${p.pid}</span></span><span class="process-memory">${esc(mib(p.rssBytes))}</span></li>`).join('');
+    const disks = d.disks.map((disk) => {
+      const level = disk.mounted === false || disk.readOnly || disk.usedPct >= 95 ? 'critical' : disk.usedPct >= 90 ? 'warning' : '';
+      const detail = disk.mounted === false ? 'Not mounted' : disk.mounted == null ? 'Mount status unavailable'
+        : `${disk.freeBytes == null ? 'Space reading unavailable' : `${gib(disk.freeBytes)} free of ${gib(disk.totalBytes)}`}${disk.readOnly ? ' · Read-only' : ''}`;
+      return `<div class="disk"><div class="diagnostic-row"><span>${esc(disk.name)}</span><span class="diagnostic-status ${level}">${disk.usedPct != null ? `${disk.usedPct}% used` : '—'}</span></div>
+        <div class="diagnostic-detail">${esc(disk.path)} · ${esc(detail)}</div>${disk.usedPct != null ? `<div class="meter ${level}" aria-hidden="true"><div class="fill" style="width:${disk.usedPct}%"></div></div>` : ''}</div>`;
+    }).join('');
+    const backup = d.backup;
+    const oldBackup = backup.lastSuccessAt && Date.now() - backup.lastSuccessAt > 36 * 3600_000;
+    const backupLevel = backup.state === 'failed' ? 'critical' : oldBackup || backup.scheduleActive === false ? 'warning' : backup.state === 'success' ? 'healthy' : '';
+    const backupLabel = oldBackup && backup.state === 'success' ? 'No successful backup in 36h'
+      : { success: 'Last run succeeded', failed: 'Last run failed', running: 'Backup running', 'never-run': 'No completed run recorded', unknown: 'Status unavailable' }[backup.state] || 'Status unavailable';
+    const backupDetail = [backup.lastSuccessAt ? `Last success ${fmtFull(backup.lastSuccessAt)}` : 'Last success unknown',
+      backup.scheduleActive === false ? 'Schedule inactive' : backup.nextRunAt ? `Next ${fmtFull(backup.nextRunAt)}` : 'Next run unknown'].join(' · ');
+    const routes = d.tailscale.connections.map((c) => `${c.count} ${c.type === 'peer-relay' ? 'peer relay' : c.type} connection${c.count === 1 ? '' : 's'}`).join(' · ');
+    const tailscale = d.tailscale.state === 'running' ? routes || 'Connected · no active peer traffic' : d.tailscale.state === 'offline' ? 'Not connected' : 'Status unavailable';
+    const events = (history?.events || []).slice(0, 10).map((e) => `<li class="event-row ${e.level === 'critical' ? 'critical' : e.level === 'warning' ? 'warning' : ''}"><span class="health-dot" aria-hidden="true"></span><div class="event-title">${esc(e.title)}<time class="event-time" datetime="${new Date(e.timestamp).toISOString()}">${esc(fmtFull(e.timestamp))} · ${esc(ago(e.timestamp))}</time></div></li>`).join('');
+    target.innerHTML = `<h2 class="diagnostics-heading">Computer diagnostics</h2><div class="diagnostics-grid">${d.agentWorkflow ? renderAgentWorkflow(d.agentWorkflow) : ''}
+      <article class="diagnostic-card"><h3>Memory & processes</h3><div class="diagnostic-status ${d.memoryLevel === 'critical' ? 'critical' : d.memoryLevel === 'warning' ? 'warning' : ''}">${esc(pressureLabels[d.memoryLevel] || pressureLabels.unknown)}</div>
+        <div class="pressure-readings">${pressure}</div><p class="diagnostic-detail">Time tasks spent waiting during the last 10 seconds. Top five processes by resident memory:</p><ul class="diagnostic-list">${processes || '<li class="diagnostic-detail">Process readings unavailable</li>'}</ul></article>
+      <article class="diagnostic-card"><h3>Storage & backup</h3>${disks}<div class="diagnostic-row"><span>T7 backup</span><span class="diagnostic-status ${backupLevel}">${esc(backupLabel)}</span></div><p class="diagnostic-detail">${esc(backupDetail)}</p></article>
+      <article class="diagnostic-card"><h3>Connection quality</h3><div class="diagnostic-row"><span>Wi-Fi signal</span><span>${workspace.internet.signalPct != null ? `${workspace.internet.signalPct}%` : '—'}</span></div>
+        <div class="diagnostic-row"><span>Wi-Fi link rate</span><span>${esc(workspace.internet.linkRate || '—')}</span></div><div class="diagnostic-row"><span>Tailscale</span><span>${esc(tailscale)}</span></div>${renderLatency(history?.samples || [])}<p class="diagnostic-detail">Link rate is the Wi-Fi connection rate. Internet timings are HTTPS response times from this laptop.</p></article>
+      <article class="diagnostic-card"><h3>Recent events</h3><ul class="diagnostic-list">${events || '<li class="diagnostic-detail">No recent events</li>'}</ul><p class="diagnostic-detail">Latest 10 events · sampled every 30 seconds, even with this page closed. ${history?.persisted === false ? 'History could not be saved.' : 'History is retained for seven days.'}</p></article>
+    </div>`;
+  }
+
+  function renderAgentWorkflow(workflow) {
+    const level = workflow.pumpState === 'failed' || workflow.staleCount > 0 ? 'critical'
+      : workflow.paused || workflow.timerActive === false || workflow.reason === 'Waiting for quota' ? 'warning' : '';
+    const count = workflow.available ? `${workflow.count} related process${workflow.count === 1 ? '' : 'es'}` : 'Process readings unavailable';
+    const resources = workflow.available ? `CPU avg ${workflow.cpuPct.toFixed(1)}% · Summed RSS ${mib(workflow.rssBytes)}` : '';
+    const pump = `Pump ${workflow.pumpState} · Timer ${workflow.timerActive == null ? 'unknown' : workflow.timerActive ? 'active' : 'inactive'}`;
+    const tick = workflow.lastTickAt ? `Last tick ${ago(workflow.lastTickAt)}` : 'Last tick unknown';
+    const states = { R: 'Running', S: 'Sleeping', D: 'I/O wait', T: 'Stopped', t: 'Tracing stop', Z: 'Zombie', I: 'Idle', P: 'Parked', X: 'Exited' };
+    const rows = workflow.processes.map((p) => {
+      const role = p.role === 'agentctl' ? `agentctl ${p.command || ''}` : p.role === 'child' ? `Child of #${p.rootPid}` : 'build-workflow';
+      const stateLevel = ['Z', 'T', 't', 'D'].includes(p.state) ? 'warning' : '';
+      return `<tr><td>${esc(p.name)}<span class="process-description">${esc(role)} · parent #${p.ppid}</span></td><td class="num">${p.pid}</td><td class="num">${p.cpuPct.toFixed(1)}%</td><td class="num">${esc(mib(p.rssBytes))}</td><td>${esc(p.elapsedSec < 60 ? `${p.elapsedSec}s` : fmtDur(p.elapsedSec))}</td><td class="diagnostic-status ${stateLevel}">${esc(states[p.state] || p.state)}</td></tr>`;
+    }).join('');
+    const processTable = rows ? `<div class="table-scroll" role="region" aria-label="Agent workflow processes" tabindex="0"><table class="workflow-process-table"><thead><tr><th>Process</th><th class="num">PID</th><th class="num">CPU avg</th><th class="num">RSS</th><th>Elapsed</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<p class="diagnostic-detail">${workflow.available ? 'No related OS processes detected. The scheduled pump normally exits between ticks; T3 worker activity is also tracked through the job records below.' : 'Cannot read the process list right now.'}</p>`;
+    const jobRow = (job) => {
+      const status = job.stale ? job.status === 'launched' ? 'Launch overdue' : 'Heartbeat overdue' : job.status;
+      const color = job.stale || ['failed', 'blocked', 'stalled'].includes(job.status) ? 'warning' : '';
+      const time = job.finishedAt ? `finished ${ago(job.finishedAt)}` : job.heartbeatAt ? `heartbeat ${ago(job.heartbeatAt)}` : job.createdAt ? `created ${ago(job.createdAt)}` : 'Time unavailable';
+      return `<li class="process-row"><span class="process-name">${esc(job.id)}<span class="event-time">${esc(job.mode)} · ${esc(time)}</span></span><span class="diagnostic-status ${color}">${esc(status)}</span></li>`;
+    };
+    const jobs = !workflow.jobsAvailable ? '<p class="diagnostic-detail">Job records unavailable</p>'
+      : `<h4>Active jobs: ${workflow.activeCount}${workflow.partial ? ' (partial reading)' : ''}</h4><ul class="diagnostic-list">${workflow.activeJobs.map(jobRow).join('') || '<li class="diagnostic-detail">No active job records</li>'}</ul>${workflow.activeCount > workflow.activeJobs.length ? '<p class="diagnostic-detail">Showing the first 20 active job records.</p>' : ''}
+        ${workflow.recentJobs.length ? `<h4>Recent jobs</h4><ul class="diagnostic-list">${workflow.recentJobs.map(jobRow).join('')}</ul>` : ''}`;
+    return `<article class="diagnostic-card workflow-card"><h3>Agentctl & build-workflow</h3><div class="workflow-summary"><span class="diagnostic-status ${level}">${esc(workflow.reason)}</span><span class="diagnostic-detail">${esc(pump)} · ${esc(tick)}</span></div>
+      <div class="workflow-summary"><span>${esc(count)}</span><span class="diagnostic-detail">${esc(resources)}</span></div>${processTable}
+      ${workflow.truncated ? '<p class="diagnostic-detail">Showing the first 100 related processes.</p>' : ''}
+      <div class="workflow-jobs">${jobs}</div><p class="diagnostic-detail">CPU is averaged over each process lifetime. Summed RSS can count shared memory more than once. Job records and OS process counts are separate; job heartbeats use the workflow’s configured deadlines.</p>
+      ${workflow.partial ? '<p class="diagnostic-detail">Some job records could not be read; counts may be incomplete.</p>' : ''}</article>`;
+  }
+
+  async function loadWorkspace(force = false) {
+    if (workspaceLoading) return;
+    workspaceLoading = true;
+    try {
+      const res = await fetch(`/api/workspace${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(12_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      workspace = await res.json();
+      workspaceError = false;
+    } catch {
+      workspaceError = true;
+    } finally {
+      workspaceLoading = false;
+      renderWorkspace();
+    }
+  }
+
+  async function refreshAll(force = false) {
+    $('refresh').disabled = true;
+    try {
+      await Promise.all([load(force), loadWorkspace(force)]);
+    } finally {
+      $('refresh').disabled = false;
+    }
+  }
 
   // Derive everything the UI shows about one window at the current moment.
   function view(w, now) {
@@ -292,9 +574,9 @@
         </tr>`;
       }),
     );
-    return `<table>
+    return `<div class="table-scroll" role="region" aria-label="Quota table" tabindex="0"><table>
       <thead><tr><th>Account</th><th>Window</th><th class="num">Left</th><th class="num">Used</th><th>Reset</th><th>Status</th></tr></thead>
-      <tbody>${rows.join('')}</tbody></table>`;
+      <tbody>${rows.join('')}</tbody></table></div>`;
   }
 
   function render() {
@@ -323,7 +605,6 @@
   async function load(force = false) {
     if (loading) return;
     loading = true;
-    $('refresh').disabled = true;
     try {
       const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -333,7 +614,6 @@
       $('banner').innerHTML = `<div class="banner">Can't reach the quota server (${esc(err.message)}). Is <code>node server.mjs</code> running?</div>`;
     } finally {
       loading = false;
-      $('refresh').disabled = false;
       render();
     }
   }
@@ -360,17 +640,18 @@
   });
   document.addEventListener('focusout', () => (tip.style.display = 'none'));
 
-  $('refresh').onclick = () => load(true);
+  $('refresh').onclick = () => refreshAll(true);
   $('view').onclick = () => {
     tableView = !tableView;
     $('view').setAttribute('aria-pressed', tableView);
     render();
   };
-  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && load());
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && refreshAll());
 
-  load();
+  refreshAll();
+  setInterval(() => document.visibilityState === 'visible' && loadWorkspace(), 30_000);
   setInterval(load, 120_000);
-  setInterval(render, 15_000);
+  setInterval(() => { render(); renderWorkspace(); }, 15_000);
 </script>
 </body>
 </html>

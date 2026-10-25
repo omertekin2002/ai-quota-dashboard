@@ -5,7 +5,8 @@
   "description": "Local dashboard for remaining 5-hour and weekly limits on Claude and ChatGPT (Codex) subscriptions",
   "scripts": {
     "start": "node server.mjs",
-    "json": "node server.mjs --json"
+    "json": "node server.mjs --json",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"

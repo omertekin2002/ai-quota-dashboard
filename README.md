@@ -21,6 +21,45 @@ For each account and limit window, including model-specific ones such as Claude'
 
 Hover a window for exact numbers. The **Table** button shows everything as a table. The page updates every 2 minutes, and the tab title shows the tightest window per account.
 
+## Workspace computer
+
+On Linux, the **Workspace computer** panel reports the computer running the dashboard:
+
+- Battery state of charge, charging state, and AC power.
+- CPU temperature, plus GPU and SSD temperatures when their sensors are readable.
+- Memory usage (using Linux's available-memory reading), swap usage, and uptime.
+- The connected Wi-Fi network's name (SSID), or the wired connection's name, along with internet reachability and the HTTPS check's response time. Either Google's or Cloudflare's connectivity endpoint can confirm access; NetworkManager helps distinguish a disconnected link, limited connectivity, and a sign-in portal when both checks fail.
+- Whether **CLIProxyAPI**, **ngrok-proxy-llm**, **T3 Code**, **Tailscale**, and the **network watchdog** are running, with automatic restart counts and service uptime. HTTP checks separately verify T3's local page and Tailscale route, CLIProxyAPI's `/healthz`, the retry proxy's backend-aware `/health`, and its public ngrok route. They don't send LLM requests or refresh credentials.
+
+Below the quota cards, **Computer diagnostics** adds:
+
+- Linux CPU, memory, and I/O pressure (the share of time tasks were stalled over the last 10 seconds), plus the five largest processes by resident memory. The top-memory list shows executable names and PIDs, without arguments or environments. Memory warnings use available RAM and pressure: warning at ≤10% available, ≥10% partial stalls, or ≥1% full stalls; critical at ≤5% available or ≥10% full stalls.
+- Internal SSD and T7 free space, actual T7 mount presence, read-only mount detection, and the last backup result, last known success, and next scheduled run. An autofs placeholder does not count as a mounted T7. A previous successful backup remains recorded if a later run fails; the last-success time is unknown if monitoring starts after a failure with no earlier record.
+- Wi-Fi signal and link rate, active Tailscale peer connection types/counts, and a 30-minute history of HTTPS response times and unsuccessful internet checks. Link rate is not measured internet speed; the Tailscale view shows active connections, not a client-specific speed test.
+- A recent-events timeline for observed service state changes/restarts, failed/recovered HTTP checks, internet/network changes, link-drop and OOM-kill counter increases, memory pressure, storage changes, and backup results. Events are sampled, not a complete historical log; brief changes can fall between readings. Monitoring starts tracking on installation, with the current backup result seeded from systemd.
+
+### Agentctl & build-workflow
+
+The diagnostics include a dedicated process/pipeline panel:
+
+- Matches `agentctl` script entrypoints, processes working inside the build-workflow checkout, its T3 worktrees, or `~/.agent-workflow`, and their descendants. Unrelated agents or shell commands merely mentioning these names are excluded. An observed child remains tracked if reparented, using its PID and Linux start-time identity to avoid confusing a reused PID with the original process. That detached-child association lasts for the dashboard process lifetime.
+- Shows PID/parent, role, process state, elapsed time, lifetime-average CPU percentage, individual RSS, and combined totals. Shared memory can be counted more than once in summed RSS. At most 100 process rows are displayed.
+- Reads `agent-pump.service` and its timer. An inactive successful oneshot pump is **idle**, not a failure. It shows paused/quota-waiting state and the last tick without invoking `agentctl` or changing the pipeline.
+- Reads selected job-record fields: ID, mode, status, timestamps, and whether launch/heartbeat deadlines are overdue. These are independent of OS process counts, because T3 workers can continue while no CLI command runs. Configured `staleMinutes` and `launchTimeoutMinutes` are respected (fallbacks: 60 and 15 minutes). The first 20 active and five recent completed records are shown; up to 500 most recently modified records are inspected, with partial readings marked.
+- Adds observed process starts/exits, stopped/zombie states, pump/timer/pause changes, job status changes, and overdue/recovered heartbeats to the existing event timeline. Missing sources do not generate false process exits.
+
+For script identification, the monitor briefly inspects a bounded local command-line prefix and working directory. Neither is returned by the API or saved in history. Prompts, arguments, job titles, notes, summaries, environments, and the workflow's `secrets` directory are not published. Monitoring does not launch, pause, kill, or modify jobs. Default paths and matching rules are in `agent-workflow.mjs`; the workflow state directory honors `AGENT_HOME`.
+
+The server samples computer readings every 30 seconds even when no browser page is open. The page updates its computer panel every 30 seconds while visible. **Refresh** updates both computer readings and quotas. `/api/workspace` has its own 15-second cache (manual refresh: 5 seconds), independent from provider requests. Missing sensors or inaccessible services show as unavailable or unknown. If an update fails, the last reading stays visible with a warning.
+
+The public ngrok HTTP check runs at most once every 15 minutes, including on manual refresh, to limit requests against its allowance. Its reading has a separate check timestamp; local health checks still run with each computer collection. Only the retry proxy's existing HTTPS ngrok tunnel is used, with a fixed `/health` path and redirects disabled. All HTTP probes have bounded timeouts and response sizes.
+
+History is stored atomically in `.cache/workspace-history.json`: up to 100 events over seven days and 80 latency samples covering up to 30 minutes. It survives dashboard restarts. It contains selected status readings only, not raw journal logs, peer addresses, tokens, or credentials. A save failure is shown in the events panel.
+
+Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process memory, filesystem space, NetworkManager, and Tailscale status, and makes bounded HTTP(S) checks. It never controls services or changes power/network settings. The monitored units are listed in `workspace.mjs`, and health endpoints in `diagnostics.mjs`; unsupported operating systems still show quotas normally. No new packages or elevated privileges are needed.
+
+Run `npm test` for collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks.
+
 ## Where the credentials come from
 
 Accounts are discovered automatically. When the same account appears in several places, it's shown once.
@@ -39,11 +78,11 @@ Usage numbers come from `api.anthropic.com/api/oauth/usage` and `chatgpt.com/bac
 On Linux, the Claude login is read from `~/.claude/.credentials.json`; the Codex and CLIProxyAPI files are the same as on macOS. To reach the dashboard from your other tailnet devices:
 
 ```sh
-tailscale serve --bg 7417     # https://<machine>.<tailnet>.ts.net → 127.0.0.1:7417, tailnet-only, persists across reboots
+tailscale serve --bg --https=7417 http://127.0.0.1:7417
 ALLOWED_HOSTS=<machine>.<tailnet>.ts.net npm start
 ```
 
-`tailscale serve` passes the MagicDNS name through as the `Host` header, so that name has to be in `ALLOWED_HOSTS`. Use `serve`, not `funnel`; `funnel` would put the dashboard on the public internet.
+The tailnet URL is `https://<machine>.<tailnet>.ts.net:7417`. Choose a free HTTPS port; omitting `--https` would use port 443 and could replace another app's route. `tailscale serve` passes the MagicDNS name through as the `Host` header, so that name has to be in `ALLOWED_HOSTS`. Funnel makes the dashboard public; this laptop already has an explicitly approved Funnel route on port 8443, which should be preserved.
 
 ## Notes
 
