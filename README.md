@@ -77,7 +77,9 @@ History is stored atomically in `.cache/workspace-history.json`: up to 100 event
 
 Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process memory, filesystem space, NetworkManager, and Tailscale status, and makes bounded HTTP(S) checks. It never controls services or changes power/network settings. The monitored units are listed in `workspace.mjs`, and health endpoints in `diagnostics.mjs`; unsupported operating systems still show quotas normally. No new packages or elevated privileges are needed.
 
-Run `npm test` for collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks.
+Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks.
+
+GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`.
 
 ## Where the credentials come from
 
@@ -101,7 +103,13 @@ tailscale serve --bg --https=7417 http://127.0.0.1:7417
 ALLOWED_HOSTS=<machine>.<tailnet>.ts.net npm start
 ```
 
-The tailnet URL is `https://<machine>.<tailnet>.ts.net:7417`. Choose a free HTTPS port; omitting `--https` would use port 443 and could replace another app's route. `tailscale serve` passes the MagicDNS name through as the `Host` header, so that name has to be in `ALLOWED_HOSTS`. Funnel makes the dashboard public; this laptop already has an explicitly approved Funnel route on port 8443, which should be preserved.
+The tailnet URL is `https://<machine>.<tailnet>.ts.net:7417`. Choose a free HTTPS port; omitting `--https` would use port 443 and could replace another app's route. `tailscale serve` passes the MagicDNS name through as the `Host` header, so that name has to be in `ALLOWED_HOSTS`.
+
+The dashboard is tailnet-only: by the owner's decision ([#7](https://github.com/omertekin2002/ai-quota-dashboard/issues/7)) it must only be reachable from devices on the tailnet. Don't enable Tailscale Funnel for it, because Funnel publishes it to the public internet. On this laptop it's served on port 8443 with a tailnet-only Serve route:
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:7417
+```
 
 ## Notes
 
