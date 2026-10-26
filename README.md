@@ -60,6 +60,8 @@ Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process 
 
 Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks.
 
+GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`.
+
 ## Where the credentials come from
 
 Accounts are discovered automatically. When the same account appears in several places, it's shown once.
