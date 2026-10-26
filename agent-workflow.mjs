@@ -92,12 +92,22 @@ export function createAgentWorkflowMonitor({ procRoot = '/proc', run, now = Date
   }
 
   async function pipeline() {
-    const [status, config, paused, unitsRaw, files] = await Promise.all([
+    const [status, config, state, paused, unitsRaw, files] = await Promise.all([
       readJson(path.join(workflowHome, 'status.json')), readJson(path.join(repoRoot, 'config.json')),
+      readJson(path.join(workflowHome, 'state.json')),
       stat(path.join(workflowHome, 'PAUSED')).then(() => true).catch((e) => e.code === 'ENOENT' ? false : null),
       run('systemctl', ['--user', 'show', 'agent-pump.service', 'agent-pump.timer', '--property=Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainExitTimestamp,LastTriggerUSec', '--no-pager']),
       readdir(path.join(workflowHome, 'jobs')).catch(() => null),
     ]);
+    const day = new Date(now()).toISOString().slice(0, 10);
+    const plansByDay = state?.plansByDay;
+    const count = plansByDay && typeof plansByDay === 'object' && !Array.isArray(plansByDay)
+      ? Object.hasOwn(plansByDay, day) ? plansByDay[day] : 0 : null;
+    const launched = Number.isSafeInteger(count) && count >= 0 ? count : null;
+    const limit = Number.isSafeInteger(config?.maxPlansPerDay) && config.maxPlansPerDay >= 0 ? config.maxPlansPerDay : null;
+    const dailyPlans = { day, launched, limit,
+      remaining: launched != null && limit != null ? Math.max(0, limit - launched) : null,
+      resetsAt: Date.parse(`${day}T00:00:00.000Z`) + 86_400_000 };
     const units = unitProperties(unitsRaw), service = units.get('agent-pump.service'), timer = units.get('agent-pump.timer');
     const pumpState = service?.LoadState !== 'loaded' ? 'unknown' : ['active', 'activating'].includes(service.ActiveState) ? 'running'
       : service.ActiveState === 'failed' || (service.Result && service.Result !== 'success') || (service.ExecMainStatus && service.ExecMainStatus !== '0') ? 'failed' : 'idle';
@@ -120,7 +130,7 @@ export function createAgentWorkflowMonitor({ procRoot = '/proc', run, now = Date
       : /^not configured/i.test(decision) ? 'Not configured' : /^(low memory|not enough memory|insufficient memory)/i.test(decision) ? 'Waiting for memory'
       : active.length ? 'Jobs active' : pumpState === 'running' ? 'Pump running' : pumpState === 'failed' ? 'Pump failed' : status ? 'Waiting for next tick' : 'Status unavailable';
     return { paused, reason, pumpState, timerActive: timer?.LoadState === 'loaded' ? timer.ActiveState === 'active' : null,
-      lastTickAt: date(status?.at), lastRunAt: systemdTime(service?.ExecMainExitTimestamp),
+      lastTickAt: date(status?.at), lastRunAt: systemdTime(service?.ExecMainExitTimestamp), dailyPlans,
       jobsAvailable: files != null, partial: invalid > 0 || filesWithTimes.length > 500,
       activeCount: files == null ? null : active.length, activeJobs: active.slice(0, 20),
       recentJobs: jobs.filter((j) => j.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt).slice(0, 5),

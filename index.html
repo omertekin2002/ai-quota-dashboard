@@ -150,6 +150,8 @@
   .workflow-card { grid-column: 1 / -1; }
   .workflow-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin-bottom: 12px; }
   .workflow-summary .diagnostic-detail { margin: 0; }
+  .workflow-plans { margin: 16px 0; }
+  .workflow-plans .meter { height: 5px; margin: 4px 0 8px; }
   .workflow-jobs { margin-top: 16px; }
   .workflow-jobs h4 { font-size: 12.5px; margin: 0 0 8px; font-weight: 600; }
   .workflow-process-table th, .workflow-process-table td { padding: 8px 10px; font-size: 12px; }
@@ -407,6 +409,13 @@
     const resources = workflow.available ? `CPU avg ${workflow.cpuPct.toFixed(1)}% · Summed RSS ${mib(workflow.rssBytes)}` : '';
     const pump = `Pump ${workflow.pumpState} · Timer ${workflow.timerActive == null ? 'unknown' : workflow.timerActive ? 'active' : 'inactive'}`;
     const tick = workflow.lastTickAt ? `Last tick ${ago(workflow.lastTickAt)}` : 'Last tick unknown';
+    const plans = workflow.dailyPlans;
+    const plansKnown = plans?.launched != null && plans?.limit != null;
+    const plansReached = plansKnown && plans.launched >= plans.limit;
+    const plansLevel = plansReached ? 'warning' : '';
+    const plansPct = plansKnown ? plans.limit > 0 ? Math.min(100, 100 * plans.launched / plans.limit) : 100 : null;
+    const plansDetail = [plans?.remaining != null ? `${plans.remaining} remaining${plansReached ? ' · Daily limit reached' : ''}` : 'Daily plan reading unavailable',
+      plans?.resetsAt ? `Resets ${fmtClock(plans.resetsAt)} (00:00 UTC)` : ''].filter(Boolean).join(' · ');
     const states = { R: 'Running', S: 'Sleeping', D: 'I/O wait', T: 'Stopped', t: 'Tracing stop', Z: 'Zombie', I: 'Idle', P: 'Parked', X: 'Exited' };
     const rows = workflow.processes.map((p) => {
       const role = p.role === 'agentctl' ? `agentctl ${p.command || ''}` : p.role === 'child' ? `Child of #${p.rootPid}` : 'build-workflow';
@@ -425,6 +434,9 @@
       : `<h4>Active jobs: ${workflow.activeCount}${workflow.partial ? ' (partial reading)' : ''}</h4><ul class="diagnostic-list">${workflow.activeJobs.map(jobRow).join('') || '<li class="diagnostic-detail">No active job records</li>'}</ul>${workflow.activeCount > workflow.activeJobs.length ? '<p class="diagnostic-detail">Showing the first 20 active job records.</p>' : ''}
         ${workflow.recentJobs.length ? `<h4>Recent jobs</h4><ul class="diagnostic-list">${workflow.recentJobs.map(jobRow).join('')}</ul>` : ''}`;
     return `<article class="diagnostic-card workflow-card"><h3>Agentctl & build-workflow</h3><div class="workflow-summary"><span class="diagnostic-status ${level}">${esc(workflow.reason)}</span><span class="diagnostic-detail">${esc(pump)} · ${esc(tick)}</span></div>
+      <div class="workflow-plans"><div class="diagnostic-row"><span>Daily plans (UTC)</span><strong class="diagnostic-status ${plansLevel}">${esc(plans?.launched ?? '—')} / ${esc(plans?.limit ?? '—')} launched today</strong></div>
+        ${plansPct != null ? `<div class="meter ${plansLevel}" aria-hidden="true"><div class="fill" style="width:${plansPct}%"></div></div>` : ''}
+        <p class="diagnostic-detail">${esc(plansDetail)}</p></div>
       <div class="workflow-summary"><span>${esc(count)}</span><span class="diagnostic-detail">${esc(resources)}</span></div>${processTable}
       ${workflow.truncated ? '<p class="diagnostic-detail">Showing the first 100 related processes.</p>' : ''}
       <div class="workflow-jobs">${jobs}</div><p class="diagnostic-detail">CPU is averaged over each process lifetime. Summed RSS can count shared memory more than once. Job records and OS process counts are separate; job heartbeats use the workflow’s configured deadlines.</p>

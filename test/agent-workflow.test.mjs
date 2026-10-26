@@ -88,6 +88,48 @@ test('idle oneshot pump is normal, active jobs use configured heartbeat limits, 
   assert.equal((await monitor()).reason, 'Paused');
 });
 
+test('daily plans use the pump launch counter and configured limit, and roll over at midnight UTC', async (t) => {
+  const f = await setup(t);
+  let now = Date.parse('2026-10-26T23:59:59.999Z');
+  await f.file('repo/config.json', { maxPlansPerDay: 42, webhook: 'PRIVATE_WEBHOOK' });
+  await f.file('workflow/state.json', { plansByDay: { '2026-10-25': 99, '2026-10-26': 25 }, repos: { private: 'PRIVATE_REPO' } });
+  // Job history is not the counter: failed launches still consume the pump's cap.
+  await f.file('workflow/jobs/job-failed-plan.json', { id: 'job-failed-plan', mode: 'plan', status: 'failed' });
+  const monitor = createAgentWorkflowMonitor({ ...f.options, now: () => now, run: async () => null });
+  const result = await monitor();
+  assert.deepEqual(result.dailyPlans, { day: '2026-10-26', launched: 25, limit: 42, remaining: 17, resetsAt: Date.parse('2026-10-27T00:00:00Z') });
+  assert.ok(!JSON.stringify(result).includes('PRIVATE_'));
+  now += 1;
+  assert.deepEqual((await monitor()).dailyPlans, { day: '2026-10-27', launched: 0, limit: 42, remaining: 42, resetsAt: Date.parse('2026-10-28T00:00:00Z') });
+});
+
+test('daily plans preserve unavailable readings and handle zero or exceeded limits', async (t) => {
+  const f = await setup(t);
+  const monitor = createAgentWorkflowMonitor({ ...f.options, run: async () => null });
+  assert.deepEqual((await monitor()).dailyPlans, { day: '1970-01-01', launched: null, limit: null, remaining: null, resetsAt: 86_400_000 });
+  const state = (count) => ({ plansByDay: { '1970-01-01': count } });
+  const cases = [
+    { state: 'invalid JSON', limit: 30, launched: null, remaining: null },
+    { state: {}, limit: 30, launched: null, remaining: null },
+    { state: { plansByDay: [] }, limit: 30, launched: null, remaining: null },
+    { state: state(-1), limit: 30, launched: null, remaining: null },
+    { state: state('25'), limit: 30, launched: null, remaining: null },
+    { state: state(null), limit: 30, launched: null, remaining: null },
+    { state: state(25), limit: '30', launched: 25, remaining: null },
+    { state: state(25), limit: -1, launched: 25, remaining: null },
+    { state: state(25), limit: 20, launched: 25, remaining: 0 },
+    { state: state(0), limit: 0, launched: 0, remaining: 0 },
+  ];
+  for (const c of cases) {
+    await f.file('workflow/state.json', c.state);
+    await f.file('repo/config.json', { maxPlansPerDay: c.limit });
+    const plans = (await monitor()).dailyPlans;
+    assert.equal(plans.launched, c.launched);
+    assert.equal(plans.limit, typeof c.limit === 'number' && c.limit >= 0 ? c.limit : null);
+    assert.equal(plans.remaining, c.remaining);
+  }
+});
+
 test('unreadable process/job sources are unknown and malformed job records are partial', async (t) => {
   const f = await setup(t);
   const monitor = createAgentWorkflowMonitor({ ...f.options, run: async () => null });

@@ -17,6 +17,7 @@ test('dashboard renders diagnostics, escapes machine-supplied names, and retains
       tailscale: { state: 'running', connections: [{ type: 'direct', count: 1 }] },
       healthChecks: [{ service: 'cli.service', id: 'cli-health', label: 'Backend health', state: 'unhealthy', detail: 'HTTP 503', checkedAt: now, latencyMs: 10 }],
       agentWorkflow: { reason: 'Jobs active', pumpState: 'idle', timerActive: true, paused: false, staleCount: 1, lastTickAt: now,
+        dailyPlans: { day: '2026-10-26', launched: 25, limit: 30, remaining: 5, resetsAt: now + 3600_000 },
         available: true, count: 1, cpuPct: 5.5, rssBytes: 1024 ** 3, truncated: false,
         processes: [{ pid: 44, ppid: 1, rootPid: 44, name: '<img src=process>', role: 'agentctl', command: 'heavy', state: 'S', cpuPct: 5.5, rssBytes: 1024 ** 3, elapsedSec: 12 }],
         jobsAvailable: true, activeCount: 1, partial: false, activeJobs: [{ id: 'job-test-001', status: 'running', stale: true, mode: 'implement', heartbeatAt: now - 600_000 }], recentJobs: [] } },
@@ -43,6 +44,19 @@ test('dashboard renders diagnostics, escapes machine-supplied names, and retains
   assert.ok(!diagnostics.includes('<img'));
   assert.ok(element('workspace-content').innerHTML.includes('&lt;img src=x'));
   assert.ok(element('workspace-content').innerHTML.includes('HTTP 503'));
+  for (const label of ['Daily plans (UTC)', '25 / 30 launched today', '5 remaining', '00:00 UTC']) assert.ok(diagnostics.includes(label), label);
+  vm.runInContext('workspace.diagnostics.agentWorkflow.dailyPlans = {launched:35,limit:30,remaining:0}; renderWorkspace();', context);
+  assert.ok(element('workspace-diagnostics').innerHTML.includes('35 / 30 launched today'));
+  assert.ok(element('workspace-diagnostics').innerHTML.includes('0 remaining · Daily limit reached'));
+  assert.ok(element('workspace-diagnostics').innerHTML.includes('width:100%'));
+  vm.runInContext('workspace.diagnostics.agentWorkflow.dailyPlans = {launched:0,limit:0,remaining:0}; renderWorkspace();', context);
+  assert.ok(element('workspace-diagnostics').innerHTML.includes('0 / 0 launched today'));
+  assert.ok(!element('workspace-diagnostics').innerHTML.includes('NaN'));
+  vm.runInContext('workspace.diagnostics.agentWorkflow.dailyPlans = {launched:null,limit:30,remaining:null}; renderWorkspace();', context);
+  assert.ok(element('workspace-diagnostics').innerHTML.includes('— / 30 launched today'));
+  assert.ok(element('workspace-diagnostics').innerHTML.includes('Daily plan reading unavailable'));
+  vm.runInContext('delete workspace.diagnostics.agentWorkflow.dailyPlans; renderWorkspace();', context);
+  assert.ok(element('workspace-diagnostics').innerHTML.includes('— / — launched today'));
   vm.runInContext('workspace.diagnostics.agentWorkflow.available=false; workspace.diagnostics.agentWorkflow.processes=[]; workspace.diagnostics.agentWorkflow.jobsAvailable=false; renderWorkspace();', context);
   assert.ok(element('workspace-diagnostics').innerHTML.includes('Process readings unavailable'));
   assert.ok(element('workspace-diagnostics').innerHTML.includes('Job records unavailable'));
