@@ -21,6 +21,24 @@ For each account and limit window, including model-specific ones such as Claude'
 
 Hover a window for exact numbers. The **Table** button shows everything as a table. The page updates every 2 minutes, and the tab title shows the tightest window per account.
 
+## Agent pipeline
+
+The **Agent pipeline** panel shows the state of the [build-workflow](https://github.com/omertekin2002/build-workflow) agent pipeline for every repo in its scope. Repos excluded in its `config.json` don't appear. Everything links to GitHub.
+
+- **Needs your attention**, across all repos: issues blocked on you (`agent:needs-human`, noting the decision that unblocks one), decisions to answer, umbrella PRs ready to review and merge, agent PRs waiting for review, and local checkouts the pump couldn't sync. Each item names the exact action. It's the same list as the daily digest's, because both come from the same build-workflow code. Items the digest still lists for out-of-scope repos are only counted.
+- **Per repo**, expanded automatically when something there is blocked on you:
+  - open PRs, with the umbrella PR highlighted;
+  - the PRs stacked into the umbrella since the last one merged;
+  - pending issues: working now (with the job and its PR), queued (in the pump's order), and blocked;
+  - why queued work isn't moving, if something holds it: a running job, a pause, a rejected umbrella, or the local checkout;
+  - your answers that agents are still acting on;
+  - issues closed and PRs merged in the last 7 days;
+  - active and recently finished jobs, with their summaries.
+
+The data comes from `agentctl overview --json` in build-workflow. That command is read-only, and reads GitHub with one batched `gh api graphql` call. The server runs it in the background every 5 minutes, whether or not a page is open, and serves the cached result at `/api/pipeline`. **Refresh** forces a new reading, at most once a minute. The page re-reads the cache every minute and shows when GitHub was last read. If a run fails, the last reading stays visible with a warning. A repo GitHub returned nothing for is marked unavailable, while its jobs and local readings still show. The `agentctl` path defaults to `~/.local/bin/agentctl`; override it with `AGENTCTL`.
+
+Unlike the process panel below, this panel publishes GitHub issue and PR titles and job summaries. Keep the dashboard tailnet-only.
+
 ## Workspace computer
 
 On Linux, the **Workspace computer** panel reports the computer running the dashboard:
@@ -98,3 +116,4 @@ The tailnet URL is `https://<machine>.<tailnet>.ts.net:7417`. Choose a free HTTP
 | `CLIPROXY_AUTH_DIR` | `~/.cli-proxy-api` |
 | `CODEX_HOME` | `~/.codex` |
 | `ALLOWED_HOSTS` | (empty) — comma-separated extra hostnames to accept, e.g. your Tailscale MagicDNS name |
+| `AGENTCTL` | `~/.local/bin/agentctl` — the build-workflow CLI the pipeline panel runs |

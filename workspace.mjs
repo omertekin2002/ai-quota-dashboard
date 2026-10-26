@@ -28,11 +28,11 @@ function number(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
-async function command(file, args) {
+export async function command(file, args, { timeout = 4000, maxBuffer = 64 * 1024 } = {}) {
   try {
     const { stdout } = await exec(file, args, {
-      timeout: 4000,
-      maxBuffer: 64 * 1024,
+      timeout,
+      maxBuffer,
       env: { ...process.env, LC_ALL: 'C', SYSTEMD_PAGER: 'cat' },
     });
     return stdout;

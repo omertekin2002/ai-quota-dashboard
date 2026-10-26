@@ -17,6 +17,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getWorkspaceStatus, startWorkspaceMonitoring } from './workspace.mjs';
+import { getPipelineOverview, startPipelineOverview } from './pipeline-overview.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
@@ -407,6 +408,9 @@ const server = http.createServer(async (req, res) => {
     } else if (url.pathname === '/api/workspace') {
       const data = await getWorkspaceStatus(url.searchParams.has('force'));
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(data));
+    } else if (url.pathname === '/api/pipeline') {
+      const data = await getPipelineOverview(url.searchParams.has('force'));
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(data));
     } else if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(fs.readFileSync(path.join(HERE, 'index.html')));
     } else {
@@ -420,4 +424,5 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`AI quota dashboard → http://localhost:${PORT}`);
   startWorkspaceMonitoring();
+  startPipelineOverview();
 });

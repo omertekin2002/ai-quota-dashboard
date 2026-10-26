@@ -190,6 +190,49 @@
     .who .name { flex-wrap: wrap; gap: 3px 6px; }
   }
 
+  .pipeline { margin: 28px 0 0; }
+  .pipeline h3 { font-size: 14px; font-weight: 650; margin: 18px 0 8px; }
+  .pipeline h4 { font-size: 12.5px; font-weight: 600; margin: 14px 0 6px; color: var(--ink-2); }
+  .pipeline a { color: inherit; text-decoration-color: var(--ink-muted); text-underline-offset: 2px; }
+  .pipeline a:hover { text-decoration-color: currentColor; }
+  .pipeline-totals { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 12px; font-size: 12.5px; color: var(--ink-2); }
+  .pipeline-totals strong { font-variant-numeric: tabular-nums; }
+  .attention-group { margin: 10px 0 4px; font-size: 12px; font-weight: 600; color: var(--ink-muted); }
+  .attention-list, .pipe-list { list-style: none; margin: 0; padding: 0; }
+  .attention-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; padding: 8px 0; border-top: 1px solid var(--hairline); font-size: 13px; }
+  .attention-kind { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink-2); padding-top: 2px; }
+  .attention-kind.critical { color: var(--critical-ink); }
+  .attention-kind.warning { color: var(--warning-ink); }
+  .attention-action { font-size: 12.5px; color: var(--ink-2); margin-top: 3px; }
+  .attention-detail, .pipe-meta { font-size: 12px; color: var(--ink-muted); margin-top: 2px; overflow-wrap: anywhere; }
+  .repo { border-top: 1px solid var(--hairline); }
+  .repo > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; padding: 11px 0; cursor: pointer; list-style: none; }
+  .repo > summary::-webkit-details-marker { display: none; }
+  .repo > summary::before { content: '▸'; color: var(--ink-muted); width: 10px; }
+  .repo[open] > summary::before { content: '▾'; }
+  .repo-name { font-weight: 650; font-size: 14px; margin-right: 4px; }
+  .badge { font-size: 11.5px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+  .badge.critical { color: var(--critical-ink); border-color: color-mix(in oklab, var(--critical) 45%, transparent); }
+  .badge.warning { color: var(--warning-ink); border-color: color-mix(in oklab, var(--warning) 55%, transparent); }
+  .badge.healthy { color: var(--healthy); border-color: color-mix(in oklab, var(--healthy) 45%, transparent); }
+  .badge.fill { color: var(--fill); border-color: color-mix(in oklab, var(--fill) 45%, transparent); }
+  .repo-body { padding: 0 0 16px 20px; }
+  .repo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
+  .pipe-row { padding: 6px 0; border-top: 1px solid var(--hairline); font-size: 12.5px; overflow-wrap: anywhere; }
+  .pipe-row.umbrella { border-left: 3px solid var(--fill); padding-left: 8px; background: color-mix(in oklab, var(--fill) 6%, transparent); }
+  .pipe-row .num { font-variant-numeric: tabular-nums; color: var(--ink-2); font-weight: 600; }
+  .pipe-row .tag { font-size: 11px; font-weight: 600; color: var(--ink-2); }
+  .pipe-row .tag.critical { color: var(--critical-ink); }
+  .pipe-row .tag.warning { color: var(--warning-ink); }
+  .pipe-row .tag.healthy { color: var(--healthy); }
+  .pipe-empty { font-size: 12px; color: var(--ink-muted); padding: 4px 0; }
+  .pipe-links { font-size: 12px; color: var(--ink-muted); margin-top: 12px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  @media (max-width: 700px) {
+    .repo-grid { grid-template-columns: minmax(0, 1fr); }
+    .repo-body { padding-left: 0; }
+    .attention-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  }
+
   .legend { margin-top: 20px; color: var(--ink-muted); font-size: 12px; display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
   .legend .key { display: inline-flex; align-items: center; gap: 6px; }
   .legend .swatch { width: 18px; height: 6px; border-radius: 3px; background: var(--fill); }
@@ -228,6 +271,13 @@
     <span class="key"><span class="swatch"></span>Quota left</span>
     <span class="key"><span class="tick"></span>Time left in the window. A bar that ends left of the tick means you're using it faster than it resets.</span>
   </div>
+  <section class="workspace pipeline" id="pipeline" aria-labelledby="pipeline-title">
+    <div class="workspace-head">
+      <h2 id="pipeline-title">Agent pipeline</h2>
+      <div class="workspace-meta" id="pipeline-meta">Loading…</div>
+    </div>
+    <div id="pipeline-content"><p class="workspace-note">Loading the pipeline overview…</p></div>
+  </section>
   <section class="diagnostics" id="workspace-diagnostics" aria-label="Computer diagnostics" hidden></section>
 </main>
 <div id="tip" role="tooltip"></div>
@@ -459,10 +509,192 @@
     }
   }
 
+  // ---------- agent pipeline overview (/api/pipeline, from `agentctl overview --json`) ----------
+  let pipeline = null;
+  let pipelineLoading = false;
+  let pipelineError = false;
+  const pipelineOpen = new Map(); // repo slug → expanded, as the user left it
+
+  const isoMs = (s) => { const n = typeof s === 'string' ? Date.parse(s) : NaN; return Number.isFinite(n) ? n : null; };
+  const agoIso = (s) => { const n = isoMs(s); return n == null ? 'time unknown' : ago(n); };
+  const repoName = (slug) => String(slug || '').split('/')[1] || String(slug || '');
+  const clipText = (s, n) => { s = String(s ?? ''); return s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s; };
+  const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
+  // Links only ever point at GitHub; `html` is already escaped.
+  const ghLink = (url, html) => /^https:\/\/github\.com\//.test(url || '') ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${html}</a>` : html;
+  const badge = (text, level = '') => `<span class="badge ${level}">${esc(text)}</span>`;
+  const ATTENTION = {
+    'needs-human': { label: 'Blocked', group: 'Blocked until you act', level: 'critical' },
+    'local-checkout': { label: 'Checkout', group: 'Local checkouts out of sync', level: 'critical' },
+    decision: { label: 'Decide', group: 'Decisions to answer', level: 'warning' },
+    umbrella: { label: 'Merge', group: 'Umbrella PRs ready to review and merge', level: '' },
+    review: { label: 'Review', group: 'Agent PRs waiting for your review', level: '' },
+  };
+
+  function attentionRow(a, withRepo = true) {
+    const kind = ATTENTION[a.kind] || { label: 'Attention', level: '' };
+    const ref = `${withRepo ? repoName(a.repo) : ''}${a.number ? `#${esc(a.number)}` : ''}`;
+    const title = a.kind === 'umbrella' ? `umbrella PR · ${a.title}` : a.title;
+    const options = a.kind === 'decision' && a.options?.length
+      ? `<div class="attention-detail">${a.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${esc(clipText(o, 120))}`).join(' · ')}${a.recommendation ? ` · Agent suggests: ${esc(clipText(a.recommendation, 160))}` : ''}</div>` : '';
+    return `<li class="attention-row"><span class="attention-kind ${kind.level}">${a.urgent ? '🔥 ' : ''}${esc(kind.label)}</span><div>
+      ${ghLink(a.url, `${ref ? `<strong>${esc(ref)}</strong> ` : ''}${esc(title)}`)}${a.detail ? `<div class="attention-detail">${esc(a.detail)}</div>` : ''}${options}
+      <div class="attention-action">→ ${esc(a.action)}</div></div></li>`;
+  }
+
+  function jobRef(job) {
+    return `<a href="#job-${esc(job.id)}">${esc(job.mode)} job ${esc(job.id)}</a>`;
+  }
+  function jobState(job) {
+    if (job.stale) return { text: job.status === 'launched' ? 'Launch overdue' : 'Heartbeat overdue', level: 'critical' };
+    return { text: job.status, level: ['failed', 'blocked', 'stalled'].includes(job.status) ? 'warning' : job.status === 'running' ? 'healthy' : '' };
+  }
+
+  function issueRow(i, r) {
+    const ref = `<span class="num">#${esc(i.number)}</span> ${esc(i.title)}`;
+    const meta = [];
+    if (i.state === 'working') {
+      meta.push(i.job ? `${jobRef(i.job)} · ${i.job.heartbeatAt ? `heartbeat ${esc(agoIso(i.job.heartbeatAt))}` : `launched ${esc(agoIso(i.job.createdAt))}`}${i.job.stale ? ' · <span class="tag critical">overdue</span>' : ''}` : 'labeled agent:working, no active job record');
+    } else if (i.state === 'queued') {
+      meta.push(i.queue === 'task' ? 'Task you approved (agent:ready)' : 'Filed improvement');
+      meta.push(`filed ${esc(agoIso(i.createdAt))}`);
+    } else if (i.state === 'blocked') {
+      meta.push(i.waitingOn ? `Waiting on your decision ${i.waitingOn.map((n) => `#${esc(n)}`).join(', ')}` : 'Needs you (agent:needs-human)');
+    } else if (i.state === 'decision') meta.push('Decision for you (agent:decision)');
+    else if (i.state === 'review') meta.push('Agent PR waiting for your review (agent:review)');
+    if (i.pr) meta.push(ghLink(i.pr.url, `PR #${esc(i.pr.number)}`));
+    return `<li class="pipe-row">${ghLink(i.url, ref)}<div class="pipe-meta">${meta.join(' · ')}</div></li>`;
+  }
+
+  function prRow(p) {
+    const kinds = { umbrella: 'Umbrella', improvement: `Improvement${p.issue ? ` for #${esc(p.issue)}` : ''}`, task: `Task${p.issue ? ` for #${esc(p.issue)}` : ''}`, other: '' };
+    const meta = [kinds[p.kind], `${p.head} → ${p.base}`, p.isDraft ? 'draft' : '', p.author ? `by ${p.author}` : '', `opened ${agoIso(p.createdAt)}`,
+      p.reviewDecision === 'APPROVED' ? 'approved' : p.reviewDecision === 'CHANGES_REQUESTED' ? 'changes requested' : ''].filter(Boolean);
+    return `<li class="pipe-row ${p.kind === 'umbrella' ? 'umbrella' : ''}">${ghLink(p.url, `<span class="num">#${esc(p.number)}</span> ${esc(p.title)}`)}<div class="pipe-meta">${esc(meta.join(' · '))}</div></li>`;
+  }
+
+  function jobRow(j) {
+    const st = jobState(j);
+    const when = j.finishedAt ? `finished ${agoIso(j.finishedAt)}` : j.heartbeatAt ? `heartbeat ${agoIso(j.heartbeatAt)}` : `launched ${agoIso(j.createdAt)}`;
+    return `<li class="pipe-row" id="job-${esc(j.id)}"><span class="tag ${st.level}">${esc(st.text)}</span> ${esc(j.mode)}${j.issue ? ` #${esc(j.issue)}` : ''} · ${esc(j.id)}
+      <div class="pipe-meta">${esc(when)}${j.title && j.mode !== 'plan' ? ` · ${esc(clipText(j.title, 100))}` : ''}${j.summary ? `<br>${esc(j.summary)}` : ''}</div></li>`;
+  }
+
+  const list = (items, row, empty) => items.length ? `<ul class="pipe-list">${items.map(row).join('')}</ul>` : `<div class="pipe-empty">${esc(empty)}</div>`;
+  function capped(items, row, empty, max, moreUrl) {
+    const more = items.length > max ? `<div class="pipe-empty">${ghLink(moreUrl, `+${items.length - max} more on GitHub`)}</div>` : '';
+    return list(items.slice(0, max), row, empty) + more;
+  }
+
+  function renderRepo(r, days) {
+    const issues = r.issues || {}, n = (k) => (issues[k] || []).length;
+    const attention = r.attention || [], jobs = r.jobs || { active: [], recent: [] }, resolved = r.resolved || { issues: [], prs: [] };
+    const stacked = r.stackedPrs || [];
+    const open = pipelineOpen.has(r.slug) ? pipelineOpen.get(r.slug) : attention.some((a) => a.kind !== 'umbrella');
+    const blocking = attention.some((a) => ['needs-human', 'local-checkout', 'decision'].includes(a.kind));
+    const badges = [
+      !r.available ? badge('GitHub data unavailable', 'warning') : '',
+      attention.length ? badge(`${attention.length} need${attention.length === 1 ? 's' : ''} you`, blocking ? 'critical' : 'warning') : '',
+      r.umbrella ? badge(`umbrella #${esc(r.umbrella.number)} · ${stacked.length} stacked`, 'fill') : stacked.length ? badge(`${stacked.length} stacked · no umbrella open`) : '',
+      jobs.active.length ? badge(`${plural(jobs.active.length, 'job')} running`, jobs.active.some((j) => j.stale) ? 'critical' : 'healthy') : '',
+      r.available ? badge(`${n('queued')} queued`) : '',
+      n('blocked') ? badge(`${n('blocked')} blocked`, 'critical') : '',
+      r.available ? badge(plural(r.openPrCount ?? 0, 'open PR')) : '',
+      r.available ? badge(`${resolved.issues.length} resolved · ${days}d`) : '',
+      r.paused ? badge('paused', 'warning') : '',
+    ].join('');
+    const waiting = [...(issues.decision || []), ...(issues.review || [])];
+    const other = issues.other || [];
+    const pending = r.pendingAnswers || [];
+    const left = `
+      ${attention.length ? `<h4>Needs you (${attention.length})</h4><ul class="attention-list">${attention.map((a) => attentionRow(a, false)).join('')}</ul>` : ''}
+      ${r.hold ? `<p class="workspace-note warning">${esc(r.hold)}</p>` : ''}
+      ${!r.available ? `<p class="workspace-note warning">GitHub data unavailable${r.error ? `: ${esc(r.error)}` : ''}. Jobs and local readings below are current.</p>` : ''}
+      ${r.available ? `<h4>Open pull requests (${esc(r.openPrCount ?? 0)})</h4>${list(r.openPrs || [], prRow, 'No open pull requests')}${(r.openPrCount ?? 0) > (r.openPrs || []).length ? `<div class="pipe-empty">${ghLink(`${r.url}/pulls`, 'More on GitHub')}</div>` : ''}` : ''}
+      ${r.available ? `<h4>Stacked into the umbrella (${stacked.length})</h4>${list(stacked, (p) => `<li class="pipe-row">${ghLink(p.url, `<span class="num">#${esc(p.number)}</span> ${esc(p.title)}`)}<div class="pipe-meta">${p.issue ? `closes #${esc(p.issue)} · ` : ''}stacked ${esc(agoIso(p.mergedAt))}</div></li>`, r.lastUmbrella?.state === 'MERGED' ? `Nothing stacked since umbrella #${esc(r.lastUmbrella.number)} merged` : 'Nothing stacked yet')}
+        ${r.umbrella ? `<div class="pipe-meta">Merging ${ghLink(r.umbrella.url, `umbrella PR #${esc(r.umbrella.number)}`)} lands ${plural(stacked.length, 'change')} on ${esc(r.defaultBranch)}.</div>` : ''}` : ''}
+      ${pending.length ? `<h4>Your answers agents are acting on (${pending.length})</h4><ul class="pipe-list">${pending.map((d) => `<li class="pipe-row"><span class="num">#${esc(d.number)}</span> ${esc(d.question)}<div class="pipe-meta">→ ${esc(d.answer)} · answered ${esc(agoIso(d.at))}</div></li>`).join('')}</ul>` : ''}`;
+    const right = r.available ? `
+      <h4>Working now (${n('working')})</h4>${list(issues.working || [], (i) => issueRow(i, r), jobs.active.some((j) => j.mode === 'plan') ? 'A plan job is choosing the next improvement' : 'Nothing being implemented')}
+      <h4>Queued (${n('queued')})</h4>${capped(issues.queued || [], (i) => issueRow(i, r), 'Nothing queued', 10, `${r.url}/issues?q=is%3Aopen+label%3Aagent%3Aimprovement`)}
+      <h4>Blocked (${n('blocked')})</h4>${list(issues.blocked || [], (i) => issueRow(i, r), 'Nothing blocked')}
+      ${waiting.length ? `<h4>Waiting for you (${waiting.length})</h4>${list(waiting, (i) => issueRow(i, r), '')}` : ''}
+      ${n('stacked') ? `<div class="pipe-meta">${plural(n('stacked'), 'stacked issue')} close when the umbrella merges.</div>` : ''}
+      ${other.length ? `<div class="pipe-meta">${ghLink(`${r.url}/issues`, `${plural(other.length, 'other open issue')}`)} not in the pipeline (no agent label).</div>` : ''}
+      ${r.issuesTruncated ? `<div class="pipe-meta">Showing the oldest ${(Object.values(issues).flat().length)} of ${esc(r.openIssueCount)} open issues.</div>` : ''}
+      <h4>Resolved in the last ${days} days</h4>
+      ${capped(resolved.issues, (i) => `<li class="pipe-row">${ghLink(i.url, `<span class="num">#${esc(i.number)}</span> ${esc(i.title)}`)}<div class="pipe-meta">${i.reason === 'NOT_PLANNED' ? 'closed as not planned' : i.labels?.includes('agent:decision') ? 'decided' : 'closed'} ${esc(agoIso(i.closedAt))}</div></li>`, 'No issues closed', 8, `${r.url}/issues?q=is%3Aissue+is%3Aclosed+sort%3Aupdated-desc`)}
+      ${capped(resolved.prs, (p) => `<li class="pipe-row">${ghLink(p.url, `<span class="num">#${esc(p.number)}</span> ${esc(p.title)}`)}<div class="pipe-meta">merged into ${esc(p.base)}${p.intoStack ? ' (stacked)' : ''} ${esc(agoIso(p.mergedAt))}</div></li>`, 'No PRs merged', 8, `${r.url}/pulls?q=is%3Apr+is%3Amerged+sort%3Aupdated-desc`)}` : '';
+    const jobsHtml = `<h4>Jobs</h4>${list(jobs.active, jobRow, 'No active job')}${jobs.recent.length ? `<div class="pipe-meta" style="margin-top:6px">Finished in the last ${days} days${jobs.recentCount > jobs.recent.length ? ` (latest ${jobs.recent.length} of ${jobs.recentCount})` : ''}:</div>${list(jobs.recent, jobRow, '')}` : ''}`;
+    const links = [r.vision ? ghLink(r.vision.url, `Vision #${esc(r.vision.number)}`) : 'No vision issue yet', ghLink(`${r.url}/issues`, 'Issues'), ghLink(`${r.url}/pulls`, 'Pull requests'),
+      r.localSync ? esc(`Local checkout: ${r.localSync.detail}`) : ''].filter(Boolean);
+    return `<details class="repo" data-slug="${esc(r.slug)}"${open ? ' open' : ''}><summary><span class="repo-name">${esc(repoName(r.slug))}</span>${badges}</summary>
+      <div class="repo-body"><div class="repo-grid"><div>${left}${jobsHtml}</div><div>${right}</div></div><div class="pipe-links">${links.join('<span aria-hidden="true">·</span>')}</div></div></details>`;
+  }
+
+  function renderPipeline() {
+    const p = pipeline, o = p?.overview;
+    if (!p || !o) {
+      $('pipeline-meta').textContent = pipelineError || p ? 'Unavailable' : 'Loading…';
+      if (pipelineError || p) $('pipeline-content').innerHTML = `<p class="workspace-note warning">Pipeline overview unavailable${pipelineError ? ' (can’t reach the dashboard server)' : p?.error ? ` (${esc(p.error)})` : ''}. Retrying every minute.</p>`;
+      return;
+    }
+    const repos = Array.isArray(o.repos) ? o.repos : [], attention = Array.isArray(o.attention) ? o.attention : [];
+    const days = o.windowDays || 7;
+    $('pipeline-meta').textContent = `${plural(repos.length, 'repo')} in scope · GitHub read ${p.fetchedAt ? ago(p.fetchedAt) : 'at an unknown time'} · refreshes every ${Math.round((p.refreshMs || 300_000) / 60_000)} min${p.refreshing ? ' · updating…' : ''}`;
+    const notes = [];
+    if (pipelineError) notes.push('Can’t reach the dashboard server. Showing the last reading.');
+    else if (p.error) notes.push(`The last update failed (${p.error}). Showing the reading from ${ago(p.fetchedAt)}.`);
+    if (o.paused) notes.push('The pipeline is paused: no new jobs launch. Run agentctl resume to restart it.');
+    if (o.configured === false) notes.push('Not configured: no webhook URL, so no jobs can launch.');
+    if (o.github && !o.github.available) notes.push(`GitHub unavailable${o.github.errors?.[0] ? ` (${o.github.errors[0]})` : ''}. Only local items (jobs, checkouts) are current.`);
+    if (o.github?.truncated?.length) notes.push(`Partial reading: ${o.github.truncated.join('; ')}.`);
+    const groups = Object.entries(ATTENTION).map(([kind, meta]) => {
+      const items = attention.filter((a) => a.kind === kind);
+      return items.length ? `<div class="attention-group">${esc(meta.group)} (${items.length})</div><ul class="attention-list">${items.map((a) => attentionRow(a)).join('')}</ul>` : '';
+    }).join('');
+    const all = (k) => repos.reduce((sum, r) => sum + (r.issues?.[k]?.length || 0), 0);
+    const pendingAnswers = repos.flatMap((r) => (r.pendingAnswers || []).length ? [`${repoName(r.slug)} (${r.pendingAnswers.map((d) => `#${esc(d.number)}`).join(', ')})`] : []);
+    const totals = [
+      [repos.reduce((s, r) => s + (r.jobs?.active?.length || 0), 0), 'jobs running'], [all('queued'), 'queued'], [all('blocked'), 'blocked'],
+      [repos.reduce((s, r) => s + (r.stackedPrs?.length || 0), 0), 'stacked in umbrellas'], [repos.reduce((s, r) => s + (r.openPrCount || 0), 0), 'open PRs'],
+      [repos.reduce((s, r) => s + (r.resolved?.issues?.length || 0), 0), `issues resolved in ${days} days`],
+    ].map(([value, label]) => `<span><strong>${value}</strong> ${esc(label)}</span>`).join('');
+    const outside = o.outOfScope?.attention ? ` The digest also lists ${plural(o.outOfScope.attention, 'item')} in repos outside the pipeline’s scope; they aren’t shown here.` : '';
+    $('pipeline-content').innerHTML = `${notes.map((t) => `<p class="workspace-note warning">${esc(t)}</p>`).join('')}
+      <div class="pipeline-totals">${totals}</div>
+      <h3>Needs your attention (${attention.length})</h3>
+      ${groups || '<p class="pipe-empty">Nothing needs you right now.</p>'}
+      <p class="workspace-note">The same list as the daily digest’s “Needs you”, “Decisions” and “Ready for your review”.${esc(outside)}${pendingAnswers.length ? ` Agents are acting on answers you gave: ${esc(pendingAnswers.join('; '))}.` : ''}</p>
+      <h3>Repos</h3>
+      ${repos.map((r) => renderRepo(r, days)).join('') || '<p class="pipe-empty">No repos in scope.</p>'}`;
+  }
+
+  async function loadPipeline(force = false) {
+    if (pipelineLoading) return;
+    pipelineLoading = true;
+    try {
+      const res = await fetch(`/api/pipeline${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(100_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      pipeline = await res.json();
+      pipelineError = false;
+    } catch {
+      pipelineError = true;
+    } finally {
+      pipelineLoading = false;
+      renderPipeline();
+    }
+  }
+  // Remember which repos are expanded across re-renders (toggle doesn't bubble, so listen while capturing).
+  document.addEventListener('toggle', (e) => {
+    const slug = e.target?.dataset?.slug;
+    if (slug) pipelineOpen.set(slug, e.target.open);
+  }, true);
+
   async function refreshAll(force = false) {
     $('refresh').disabled = true;
     try {
-      await Promise.all([load(force), loadWorkspace(force)]);
+      await Promise.all([load(force), loadWorkspace(force), loadPipeline(force)]);
     } finally {
       $('refresh').disabled = false;
     }
@@ -662,8 +894,9 @@
 
   refreshAll();
   setInterval(() => document.visibilityState === 'visible' && loadWorkspace(), 30_000);
+  setInterval(() => document.visibilityState === 'visible' && loadPipeline(), 60_000);
   setInterval(load, 120_000);
-  setInterval(() => { render(); renderWorkspace(); }, 15_000);
+  setInterval(() => { render(); renderWorkspace(); renderPipeline(); }, 15_000);
 </script>
 </body>
 </html>
