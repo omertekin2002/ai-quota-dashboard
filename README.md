@@ -114,7 +114,8 @@ tailscale serve --bg --https=8443 http://127.0.0.1:7417
 ## Notes
 
 - **Tokens are never refreshed or written back.** Both providers' refresh tokens are one-time-use, so refreshing them here would log the CLIs out. When a token has expired, the card shows the last successful reading, marked as old, until you run `claude` or `codex` once.
-- The last successful reading is stored in `.cache/last-good.json`. It holds usage numbers and emails only, no tokens.
+- The last successful reading is stored in `.cache/last-good.json` (written atomically, readable only by you). It holds usage numbers and emails only, no tokens. If it can't be saved, the error is logged and the live readings are still shown.
+- If an endpoint's reply has a missing or unreadable usage figure, that window shows `—` and "Usage unknown" instead of a guessed percentage.
 - The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1` or listed in `ALLOWED_HOSTS`. That stops other websites from reading it through DNS rebinding.
 - Upstream calls are cached for 90 seconds, and the Claude plan lookup for 15 minutes. Pressing **Refresh** bypasses both, at most once every 15 seconds.
 
