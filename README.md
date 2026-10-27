@@ -77,7 +77,7 @@ History is stored atomically in `.cache/workspace-history.json`: up to 100 event
 
 Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process memory, filesystem space, NetworkManager, and Tailscale status, and makes bounded HTTP(S) checks. It never controls services or changes power/network settings. The monitored units are listed in `workspace.mjs`, and health endpoints in `diagnostics.mjs`; unsupported operating systems still show quotas normally. No new packages or elevated privileges are needed.
 
-Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks.
+Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s.
 
 GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`.
 
@@ -117,6 +117,7 @@ tailscale serve --bg --https=8443 http://127.0.0.1:7417
 - The last successful reading is stored in `.cache/last-good.json` (written atomically, readable only by you). It holds usage numbers and emails only, no tokens. If it can't be saved, the error is logged and the live readings are still shown.
 - If an endpoint's reply has a missing or unreadable usage figure, that window shows `—` and "Usage unknown" instead of a guessed percentage.
 - The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1` or listed in `ALLOWED_HOSTS`. That stops other websites from reading it through DNS rebinding.
+- When a request fails, the reply is a generic `{"error":"internal error"}` with status 500; the real error is logged by the server only, so paths or tokens in error messages never reach the browser.
 - Upstream calls are cached for 90 seconds, and the Claude plan lookup for 15 minutes. Pressing **Refresh** bypasses both, at most once every 15 seconds.
 
 | Env var | Default |
