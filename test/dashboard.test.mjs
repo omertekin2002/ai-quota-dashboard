@@ -3,6 +3,52 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
+const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+
+// Run index.html's script in a vm with stub DOM elements and canned API replies.
+// Pass `now` to pin Date (and Date.now) inside the page, so durations and percentages are deterministic.
+async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, now, hidden = () => false } = {}) {
+  const elements = new Map();
+  function element(id) {
+    if (!elements.has(id)) {
+      elements.set(id, {
+        innerHTML: '', textContent: '', hidden: hidden(id), style: {}, setAttribute() {},
+        getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 0, width: 200, height: 100 }),
+      });
+    }
+    return elements.get(id);
+  }
+  const listeners = {};
+  const timeouts = [];
+  const document = {
+    getElementById: element, visibilityState: 'visible', title: '',
+    addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
+  };
+  const globals = {
+    document,
+    fetch: async (url) => ({ ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? workspace : pipeline) }),
+    AbortSignal, setInterval() {}, innerWidth: 1280, innerHeight: 800,
+    setTimeout: (fn, ms) => { timeouts.push(ms); return timeouts.length; },
+  };
+  if (now != null) {
+    globals.Date = class extends Date {
+      constructor(...args) { if (args.length) super(...args); else super(now); }
+      static now() { return now; }
+    };
+  }
+  const context = vm.createContext(globals);
+  pageScript.runInContext(context);
+  await new Promise(setImmediate);
+  // Hover window `wi` of account `ai`, the way a pointer would, and return the tooltip's HTML.
+  const hover = (ai, wi) => {
+    const target = { closest: () => ({ dataset: { a: String(ai), w: String(wi) } }) };
+    for (const fn of listeners.pointermove) fn({ target, clientX: 10, clientY: 10 });
+    return element('tip').innerHTML;
+  };
+  return { context, document, element, timeouts, hover, run: (code) => vm.runInContext(code, context) };
+}
+
 test('dashboard renders diagnostics, escapes machine-supplied names, and retains readings on failure', async () => {
   const now = Date.now();
   const fixture = {
@@ -23,19 +69,9 @@ test('dashboard renders diagnostics, escapes machine-supplied names, and retains
         jobsAvailable: true, activeCount: 1, partial: false, activeJobs: [{ id: 'job-test-001', status: 'running', stale: true, mode: 'implement', heartbeatAt: now - 600_000 }], recentJobs: [] } },
     history: { events: [{ title: '<img src=event>', timestamp: now, level: 'warning' }], samples: [{ timestamp: now - 30_000, state: 'online', latencyMs: 50 }, { timestamp: now, state: 'limited', latencyMs: null }], persisted: true },
   };
-  const elements = new Map();
-  function element(id) {
-    if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', hidden: id === 'workspace-diagnostics', style: {}, setAttribute() {} });
-    return elements.get(id);
-  }
-  const context = vm.createContext({
-    document: { getElementById: element, addEventListener() {}, visibilityState: 'visible' },
-    fetch: async (url) => ({ ok: true, json: async () => url.startsWith('/api/workspace') ? fixture : { generatedAt: now, accounts: [] } }),
-    AbortSignal, setInterval() {}, setTimeout() {},
+  const { context, element } = await loadDashboard({
+    quotas: { generatedAt: now, accounts: [] }, workspace: fixture, hidden: (id) => id === 'workspace-diagnostics',
   });
-  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
-  new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]).runInContext(context);
-  await new Promise(setImmediate);
   assert.equal(element('workspace-diagnostics').hidden, false);
   const diagnostics = element('workspace-diagnostics').innerHTML;
   for (const label of ['Memory & processes', 'Storage & backup', 'Connection quality', 'Recent events', 'Not mounted', 'Last run failed', '1 direct connection', '1 of 2 internet checks unsuccessful', 'Agentctl & build-workflow', 'agentctl heavy', 'Heartbeat overdue', 'Pump idle']) assert.ok(diagnostics.includes(label), label);
@@ -79,20 +115,7 @@ test('dashboard shows unreadable usage as unknown, never as 100% left', async ()
       { id: 'primary', label: '5-hour', usedPct: null, resetsAt: now + 3600_000, windowSec: 18000 },
     ] },
   ] };
-  const elements = new Map();
-  function element(id) {
-    if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', hidden: false, style: {}, setAttribute() {} });
-    return elements.get(id);
-  }
-  const document = { getElementById: element, addEventListener() {}, visibilityState: 'visible', title: '' };
-  const context = vm.createContext({
-    document,
-    fetch: async (url) => ({ ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? { supported: false } : {}) }),
-    AbortSignal, setInterval() {}, setTimeout() {},
-  });
-  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
-  new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]).runInContext(context);
-  await new Promise(setImmediate);
+  const { context, document, element } = await loadDashboard({ quotas });
 
   const cards = element('content').innerHTML;
   const wins = cards.split('class="win"').slice(1);
@@ -123,4 +146,225 @@ test('dashboard shows unreadable usage as unknown, never as 100% left', async ()
   vm.runInContext(`data.accounts[1].windows[0].resetsAt = ${now - 1000}; tableView = false; render();`, context);
   assert.ok(element('content').innerHTML.includes('Estimated. Refreshing…'));
   assert.equal(document.title, '40% · 100% · Quotas');
+});
+
+// Quota card fixtures. The page clock is pinned to NOW, so nothing below depends on the real clock.
+// Clock-of-day text (fmtClock / fmtFull) depends on the time zone, so it is never asserted.
+const NOW = Date.UTC(2026, 9, 27, 12, 0, 0);
+const FIVE_HOURS = 18_000;
+const WEEK = 604_800;
+const win = (label, usedPct, toResetSec, windowSec = FIVE_HOURS, extra = {}) => ({
+  id: label.toLowerCase(), label, usedPct, resetsAt: NOW + toResetSec * 1000, windowSec, ...extra,
+});
+const account = (id, windows, extra = {}) => ({
+  id, provider: 'claude', name: 'Claude', plan: 'Max', email: 'a@example.com', sources: ['Claude Code'], fetchedAt: NOW, windows, ...extra,
+});
+const quotasOf = (...accounts) => ({ generatedAt: NOW, accounts });
+const cardsOf = (html) => html.split('<article class="card">').slice(1);
+const winsOf = (html) => html.split('class="win"').slice(1);
+const tableRowsOf = (html) => html.split('<tr>').slice(2);
+const TAGS = 'div|span|article|header|code|table|thead|tbody|tr|th|td|br';
+
+// Rendered output never shows a broken value, and every `<` opens one of the page's own tags.
+function assertClean(text) {
+  for (const bad of ['NaN', 'undefined', 'null', 'width:-', 'left:-']) assert.ok(!text.includes(bad), `${bad} in ${text}`);
+  const stray = text.match(new RegExp(`<(?!/?(?:${TAGS})[\\s>])`));
+  assert.equal(stray, null, `unescaped < in ${text}`);
+}
+
+async function renderQuotas(quotas) {
+  const page = await loadDashboard({ quotas, now: NOW });
+  const cards = page.element('content').innerHTML;
+  page.run('tableView = true; render();');
+  const table = page.element('content').innerHTML;
+  page.run('tableView = false; render();');
+  assertClean(cards);
+  assertClean(table);
+  return { ...page, cards, table };
+}
+
+test('quota cards project the pace, warn before running out, and place the time-left tick', async () => {
+  const { cards, hover } = await renderQuotas(quotasOf(account('claude:a', [
+    win('Half', 30, 9000), // halfway, 30% used: 30% more by the reset, so about 40% left
+    win('Heavy', 60, 9000), // halfway, 60% used: 40% left lasts 40 / (60 / 9000s) = 6000s
+    win('Weekly', 10, 151_200, WEEK), // a quarter of the week left: 10% used + 3.3% more, about 87% left
+  ])));
+  const [half, heavy, weekly] = winsOf(cards);
+  assert.ok(half.includes('<span class="big">70%</span>'), half);
+  assert.ok(half.includes('<div class="fill" style="width:70%"></div>'), half);
+  assert.ok(half.includes('<div class="pace" style="left:50%"></div>'), half);
+  assert.ok(half.includes('resets in 2h 30m · '), half);
+  assert.ok(half.includes('<div class="win-foot ">At this pace, about 40% left at reset</div>'), half);
+  assert.ok(!half.includes('class="status'), half);
+
+  assert.ok(heavy.includes('<div class="win-foot warn">⚠ At this pace it runs out in 1h 40m, before the reset</div>'), heavy);
+  assert.ok(!heavy.includes('left at reset'), heavy);
+
+  assert.ok(weekly.includes('<div class="pace" style="left:25%"></div>'), weekly);
+  assert.ok(weekly.includes('At this pace, about 87% left at reset'), weekly);
+  assert.ok(weekly.includes('resets in 1d 18h · '), weekly);
+  assert.ok(hover(0, 2).includes('<span class="k">Time left:</span> 25% of window'));
+});
+
+test('quota cards show no projection very early in a window or before any use', async () => {
+  const { cards } = await renderQuotas(quotasOf(account('claude:a', [
+    win('Early', 5, 17_800), // 200s of 18000s elapsed (1.1%): too early to project
+    win('Idle', 0, 9000), // halfway with nothing used
+  ])));
+  const [early, idle] = winsOf(cards);
+  assert.ok(early.includes('<div class="win-foot "></div>'), early);
+  assert.ok(early.includes(`<div class="pace" style="left:${(17_800 / FIVE_HOURS) * 100}%"></div>`), early);
+  assert.ok(idle.includes('<div class="win-foot "></div>'), idle);
+  assert.ok(idle.includes('<div class="fill" style="width:100%"></div>'), idle);
+  assert.ok(idle.includes('<div class="pace" style="left:50%"></div>'), idle);
+  assert.ok(idle.includes('resets in 2h 30m · '), idle);
+  assert.ok(!cards.includes('At this pace'), cards);
+});
+
+test('a window that has not started says so and draws no time-left tick', async () => {
+  const { cards, hover } = await renderQuotas(quotasOf(account('claude:a', [win('5-hour', 0, FIVE_HOURS - 30)])));
+  const [fresh] = winsOf(cards);
+  assert.ok(fresh.includes('<span class="win-reset">starts on first use</span>'), fresh);
+  assert.ok(fresh.includes('<div class="win-foot ">Unused. The window starts when you send your first request.</div>'), fresh);
+  assert.ok(fresh.includes('<div class="fill" style="width:100%"></div>'), fresh);
+  assert.ok(!fresh.includes('class="pace"'), fresh);
+  assert.ok(fresh.includes('aria-label="5-hour: 100 percent left, starts on first use"'), fresh);
+  const tip = hover(0, 0);
+  assert.ok(!tip.includes('Resets:') && !tip.includes('Time left:'), tip);
+});
+
+test('quota levels: Low at 30% left, Nearly out at 10%, Limit reached at 0% with clamping', async () => {
+  const { cards, table } = await renderQuotas(quotasOf(account('claude:a', [
+    win('Fine', 69, 9000),
+    win('Low', 70, 9000),
+    win('Low edge', 89, 9000),
+    win('Nearly', 90, 9000),
+    win('Empty', 100, 9000),
+    win('Over', 120, 9000),
+  ])));
+  const [fine, low, lowEdge, nearly, empty, over] = winsOf(cards);
+  assert.ok(fine.includes('<div class="meter " aria-hidden="true">') && !fine.includes('class="status'), fine);
+  for (const [w, left] of [[low, 30], [lowEdge, 11]]) {
+    assert.ok(w.includes('<span class="status warning">⚠ Low</span>'), w);
+    assert.ok(w.includes('<div class="meter warning" aria-hidden="true">'), w);
+    assert.ok(w.includes(`<span class="big">${left}%</span>`), w);
+  }
+  assert.ok(nearly.includes('<span class="status critical">⛔ Nearly out</span>'), nearly);
+  assert.ok(nearly.includes('<div class="meter critical" aria-hidden="true">'), nearly);
+  for (const w of [empty, over]) {
+    assert.ok(w.includes('<span class="status critical">⛔ Limit reached</span>'), w);
+    assert.ok(w.includes('<div class="meter critical" aria-hidden="true">'), w);
+    assert.ok(w.includes('<span class="big">0%</span>'), w);
+    assert.ok(w.includes('<div class="fill" style="width:0%"></div>'), w);
+  }
+  assert.ok(over.includes('aria-label="Over: 0 percent left, '), over);
+
+  const rows = tableRowsOf(table);
+  assert.equal(rows.length, 6);
+  assert.ok(rows[0].includes('<td class="num">31%</td>') && rows[0].includes('<td>OK</td>'), rows[0]);
+  assert.ok(rows[1].includes('<td>⚠ Low</td>'), rows[1]);
+  assert.ok(rows[3].includes('<td>⛔ Nearly out</td>'), rows[3]);
+  assert.match(rows[5], /<td class="num">0%<\/td>\s*<td class="num">120%<\/td>/);
+  assert.ok(rows[5].includes('<td>⛔ Limit reached</td>'), rows[5]);
+});
+
+test('billing-cycle windows say so and draw no time-left tick', async () => {
+  const { cards, table, hover } = await renderQuotas(quotasOf(account('claude:a', [{ id: 'credits', label: 'Monthly', usedPct: 25 }])));
+  const [monthly] = winsOf(cards);
+  assert.ok(monthly.includes('<span class="win-reset">resets with billing cycle</span>'), monthly);
+  assert.ok(monthly.includes('<div class="fill" style="width:75%"></div>'), monthly);
+  assert.ok(!monthly.includes('class="pace"') && !monthly.includes('At this pace'), monthly);
+  assert.ok(tableRowsOf(table)[0].includes('<td>resets with billing cycle</td>'), table);
+  const tip = hover(0, 0);
+  assert.ok(tip.includes('<span class="k">Window:</span> n/a'), tip);
+  assert.ok(!tip.includes('Resets:') && !tip.includes('Time left:'), tip);
+});
+
+test('stale accounts show their reading age, put the error first, and never promise a refresh', async () => {
+  const stale = account('claude:old', [win('5-hour', 40, -60), win('Weekly', 50, 86_400, WEEK)], {
+    stale: true, fetchedAt: NOW - 3_600_000, error: 'Token expired. Run `claude` to sign in again.',
+  });
+  const live = account('openai:b', [win('5-hour', 20, 9000)], { provider: 'openai', name: 'ChatGPT', plan: 'Plus', email: 'b@example.com' });
+  const failing = account('openai:c', [win('5-hour', 20, 9000)], { provider: 'openai', name: 'ChatGPT', plan: 'Pro', error: 'HTTP 500 from usage endpoint' });
+  const page = await renderQuotas(quotasOf(stale, live, failing));
+  const [staleCard, liveCard, failingCard] = cardsOf(page.cards);
+
+  assert.ok(staleCard.includes('◷ 1h ago</span>') && !staleCard.includes('● Live'), staleCard);
+  assert.ok(staleCard.includes('title="Token expired. Run `claude` to sign in again. Read from Claude Code"'), staleCard);
+  const err = staleCard.indexOf('<div class="card-error">Showing the last reading. Token expired. Run <code>claude</code> to sign in again.</div>');
+  assert.ok(err > 0 && err < staleCard.indexOf('class="win"'), staleCard);
+  assert.ok(liveCard.includes('● Live') && !liveCard.includes('card-error'), liveCard);
+  // A failing account with no last reading: no badge, and the error comes after its windows.
+  assert.ok(!failingCard.includes('class="fresh'), failingCard);
+  assert.ok(failingCard.indexOf('<div class="card-error">HTTP 500 from usage endpoint</div>') > failingCard.indexOf('class="win"'), failingCard);
+  assert.ok(!failingCard.includes('Showing the last reading'), failingCard);
+
+  // The stale window's reset has passed: it estimates 100% left, but no reload is scheduled, so no "Refreshing…".
+  const [passed] = winsOf(staleCard);
+  assert.ok(passed.includes('<span class="big">100%</span>'), passed);
+  assert.ok(passed.includes('<span class="win-reset">reset since last reading</span>'), passed);
+  assert.ok(passed.includes('<div class="win-foot ">Estimated: reset since this reading</div>'), passed);
+  assert.ok(!page.cards.includes('Refreshing'), page.cards);
+  assert.deepEqual(page.timeouts, []);
+
+  const rows = tableRowsOf(page.table);
+  assert.equal(rows.length, 4);
+  for (const row of rows.slice(0, 2)) assert.ok(row.includes(' (reading from 1h ago)</td>'), row);
+  for (const row of rows.slice(2)) assert.ok(!row.includes('reading from'), row);
+
+  const tip = page.hover(0, 1);
+  assert.ok(tip.includes('<span class="k">Reading:</span> from 1h ago'), tip);
+  assertClean(tip);
+
+  // The same reading from a live account still says it is refreshing, and schedules the 20-second reload.
+  page.run('data.accounts[0].stale = false; render();');
+  assert.ok(winsOf(cardsOf(page.element('content').innerHTML)[0])[0].includes('Estimated. Refreshing…'));
+  assert.deepEqual(page.timeouts, [20_000]);
+});
+
+test('quota cards, table and tooltip escape account and window strings', async () => {
+  const evil = {
+    name: '<img src=x onerror=alert(1)>', plan: '"><script>p()</script>', email: `o'neil"<b>@example.com`,
+    error: '<img src=err> run `codex login` "now"',
+  };
+  const windows = [win('<img src=label>', 20, 9000), win(`Week"'<i>`, 10, 86_400, WEEK)];
+  const page = await renderQuotas(quotasOf(
+    account('claude:evil', windows, evil),
+    account('claude:evil-stale', windows, { ...evil, stale: true, fetchedAt: NOW - 120_000 }),
+  ));
+  const tips = [page.hover(0, 0), page.hover(0, 1), page.hover(1, 0)];
+  for (const text of [page.cards, page.table, ...tips]) {
+    assertClean(text);
+    for (const raw of ['<img', '<script', '<b>', '<i>', `"'`]) assert.ok(!text.includes(raw), `${raw} in ${text}`);
+  }
+  for (const text of [page.cards, page.table]) {
+    for (const escaped of ['&lt;img src=x onerror=alert(1)&gt;', '&quot;&gt;&lt;script&gt;p()&lt;/script&gt;', 'o&#39;neil&quot;&lt;b&gt;@example.com', '&lt;img src=label&gt;', 'Week&quot;&#39;&lt;i&gt;']) {
+      assert.ok(text.includes(escaped), `${escaped} missing from ${text}`);
+    }
+  }
+  // Backticks in errors still render as code; everything else in the error is escaped.
+  assert.ok(page.cards.includes('<div class="card-error">&lt;img src=err&gt; run <code>codex login</code> &quot;now&quot;</div>'), page.cards);
+  assert.ok(page.cards.includes('<div class="card-error">Showing the last reading. &lt;img src=err&gt; run <code>codex login</code> &quot;now&quot;</div>'), page.cards);
+  assert.ok(page.cards.includes('title="&lt;img src=err&gt; run `codex login` &quot;now&quot; Read from Claude Code"'), page.cards);
+  assert.ok(tips[0].includes('<span class="k">&lt;img src=x onerror=alert(1)&gt; &quot;&gt;&lt;script&gt;p()&lt;/script&gt;:</span> &lt;img src=label&gt;'), tips[0]);
+  assert.ok(tips[1].includes('Week&quot;&#39;&lt;i&gt;'), tips[1]);
+});
+
+test('the tooltip lists exact numbers for a window, plus its share of the weekly limit', async () => {
+  const page = await renderQuotas(quotasOf(account('claude:a', [
+    win('5-hour', 30, 9000),
+    win('Opus', 40, 302_400, WEEK, { shareOfWeeklyPct: 25 }),
+  ])));
+  const tip = page.hover(0, 0);
+  const rows = [...tip.matchAll(/<div><span class="k">([^<]*):<\/span> ([^<]*)<\/div>/g)].map((m) => [m[1], m[2]]);
+  assert.deepEqual(rows.map(([k]) => k), ['Claude Max', 'Left', 'Used', 'Window', 'Resets', 'Time left']);
+  assert.deepEqual(Object.fromEntries(rows.filter(([k]) => k !== 'Resets')), {
+    'Claude Max': '5-hour', Left: '70%', Used: '30%', Window: '5 hours', 'Time left': '50% of window',
+  });
+  assert.ok(rows[4][1].length > 0, tip);
+
+  const share = page.hover(0, 1);
+  assert.ok(share.includes('<div><span class="k">Window:</span> 7 days</div><div><span class="k">Allowance:</span> 25% of the weekly limit</div>'), share);
+  assert.ok(share.includes('<span class="k">Time left:</span> 50% of window'), share);
+  for (const text of [tip, share]) assertClean(text);
 });
