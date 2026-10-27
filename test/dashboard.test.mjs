@@ -67,3 +67,60 @@ test('dashboard renders diagnostics, escapes machine-supplied names, and retains
   vm.runInContext('workspace = {supported:false}; workspaceError=false; renderWorkspace();', context);
   assert.equal(element('workspace-diagnostics').hidden, true);
 });
+
+test('dashboard shows unreadable usage as unknown, never as 100% left', async () => {
+  const now = Date.now();
+  const quotas = { generatedAt: now, accounts: [
+    { id: 'claude:a', provider: 'claude', name: 'Claude', plan: 'Pro', email: 'a@example.com', sources: ['Claude Code'], windows: [
+      { id: 'five_hour', label: '5-hour', usedPct: 60, resetsAt: now + 3600_000, windowSec: 18000 },
+      { id: 'seven_day', label: 'Weekly', usedPct: null, resetsAt: now + 86400_000, windowSec: 604800 },
+    ] },
+    { id: 'openai:b', provider: 'openai', name: 'ChatGPT', plan: 'Plus', email: 'b@example.com', sources: ['Codex CLI'], windows: [
+      { id: 'primary', label: '5-hour', usedPct: null, resetsAt: now + 3600_000, windowSec: 18000 },
+    ] },
+  ] };
+  const elements = new Map();
+  function element(id) {
+    if (!elements.has(id)) elements.set(id, { innerHTML: '', textContent: '', hidden: false, style: {}, setAttribute() {} });
+    return elements.get(id);
+  }
+  const document = { getElementById: element, addEventListener() {}, visibilityState: 'visible', title: '' };
+  const context = vm.createContext({
+    document,
+    fetch: async (url) => ({ ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? { supported: false } : {}) }),
+    AbortSignal, setInterval() {}, setTimeout() {},
+  });
+  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]).runInContext(context);
+  await new Promise(setImmediate);
+
+  const cards = element('content').innerHTML;
+  const wins = cards.split('class="win"').slice(1);
+  assert.equal(wins.length, 3);
+  assert.ok(wins[0].includes('40%') && wins[0].includes('5-hour: 40 percent left'));
+  for (const win of wins.slice(1)) {
+    assert.ok(win.includes('<span class="big">—</span>'), win);
+    assert.ok(win.includes('Usage unknown'), win);
+    assert.ok(win.includes('usage unknown, resets in'), win);
+    assert.ok(!win.includes('class="fill"') && !win.includes('class="status') && !win.includes('At this pace'), win);
+  }
+  assert.equal(document.title, '40% · Quotas');
+
+  vm.runInContext('tableView = true; render();', context);
+  const table = element('content').innerHTML;
+  const rows = table.split('<tr>').slice(2);
+  assert.equal(rows.length, 3);
+  assert.ok(rows[0].includes('40%') && rows[0].includes('60%') && rows[0].includes('OK'));
+  for (const row of rows.slice(1)) {
+    assert.equal(row.match(/<td class="num">—<\/td>/g).length, 2, row);
+    assert.ok(row.includes('Usage unknown'), row);
+  }
+  for (const text of [cards, table, document.title]) {
+    for (const bad of ['NaN', 'null', 'undefined', '100%']) assert.ok(!text.includes(bad), `${bad} in ${text}`);
+  }
+
+  // Once the reset time passes, the window has refilled, so the estimate is 100% left again.
+  vm.runInContext(`data.accounts[1].windows[0].resetsAt = ${now - 1000}; tableView = false; render();`, context);
+  assert.ok(element('content').innerHTML.includes('Estimated. Refreshing…'));
+  assert.equal(document.title, '40% · 100% · Quotas');
+});

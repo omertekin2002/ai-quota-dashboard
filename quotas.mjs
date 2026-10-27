@@ -38,6 +38,13 @@ export function toMs(v) {
   const t = Date.parse(v);
   return Number.isNaN(t) ? null : t;
 }
+// A usage percentage as a finite number, or null when the reply's field is missing or unreadable.
+// Never 0: an unreadable figure must not look like an untouched window.
+export function pct(v) {
+  if (typeof v !== 'number' && (typeof v !== 'string' || v.trim() === '')) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
 const hash = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 12);
 const titleCase = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
@@ -183,7 +190,7 @@ export function claudeWindows(u) {
     .map(([key, label, windowSec]) => ({
       id: key,
       label,
-      usedPct: u[key].utilization ?? 0,
+      usedPct: pct(u[key].utilization),
       resetsAt: toMs(u[key].resets_at),
       windowSec,
     }));
@@ -198,14 +205,14 @@ export function claudeWindows(u) {
     windows.push({
       id: [l.group, model].filter(Boolean).join('_').toLowerCase().replace(/\W+/g, '_'),
       label,
-      usedPct: l.percent ?? 0,
+      usedPct: pct(l.percent),
       resetsAt: toMs(l.resets_at),
       windowSec,
       shareOfWeeklyPct: share?.allowance_percent_of_weekly ?? null,
     });
   });
-  if (u.extra_usage?.is_enabled && typeof u.extra_usage.utilization === 'number') {
-    windows.push({ id: 'extra_usage', label: 'Extra usage · monthly', usedPct: u.extra_usage.utilization, resetsAt: null, windowSec: null });
+  if (u.extra_usage?.is_enabled && pct(u.extra_usage.utilization) != null) {
+    windows.push({ id: 'extra_usage', label: 'Extra usage · monthly', usedPct: pct(u.extra_usage.utilization), resetsAt: null, windowSec: null });
   }
   return windows;
 }
@@ -232,7 +239,7 @@ async function fetchClaude(env, profileCache, force) {
     try {
       const usage = await withFirstWorking(env, list, (c) => getJson(env, 'https://api.anthropic.com/api/oauth/usage', claudeHeaders(c.token)));
       const windows = claudeWindows(usage);
-      accounts.push({ ...base, windows, limitReached: windows.some((w) => w.usedPct >= 100) });
+      accounts.push({ ...base, windows, limitReached: windows.some((w) => w.usedPct != null && w.usedPct >= 100) });
     } catch (err) {
       accounts.push({ ...base, error: describeError(err, 'claude') });
     }
@@ -259,7 +266,7 @@ export function codexWindows(u, now = Date.now()) {
     windows.push({
       id,
       label: [prefix, windowLabel(w.limit_window_seconds)].filter(Boolean).join(' · '),
-      usedPct: w.used_percent ?? 0,
+      usedPct: pct(w.used_percent),
       resetsAt: toMs(w.reset_at) ?? (w.reset_after_seconds != null ? now + w.reset_after_seconds * 1000 : null),
       windowSec: w.limit_window_seconds ?? null,
     });
@@ -337,10 +344,22 @@ export function createQuotaCollector({
   const env = { home, authDir, codexHome, platform, fetchImpl, now };
   const profileCache = new Map();
   let lastGood = (lastGoodFile && readJson(lastGoodFile)) || {};
+  // Written atomically (tmp file + rename) and private, since it holds account emails. A failed save
+  // only loses the fallback for the next restart, so it's logged and the live readings are still served.
   function saveLastGood() {
     if (!lastGoodFile) return;
-    fs.mkdirSync(path.dirname(lastGoodFile), { recursive: true });
-    fs.writeFileSync(lastGoodFile, JSON.stringify(lastGood, null, 1));
+    const tmp = `${lastGoodFile}.tmp`;
+    try {
+      fs.mkdirSync(path.dirname(lastGoodFile), { recursive: true });
+      fs.rmSync(tmp, { force: true });
+      fs.writeFileSync(tmp, JSON.stringify(lastGood, null, 1), { mode: 0o600 });
+      fs.renameSync(tmp, lastGoodFile);
+    } catch (err) {
+      console.error(`Could not save the last good reading to ${lastGoodFile}: ${err.code || err.message}`);
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {}
+    }
   }
 
   async function collect(force) {

@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createQuotaCollector, claudeWindows, claudePlan, codexWindows, windowLabel, describeError } from '../quotas.mjs';
+import { createQuotaCollector, claudeWindows, claudePlan, codexWindows, windowLabel, describeError, pct } from '../quotas.mjs';
 import { parseAllowedHosts, isAllowedHost } from '../hosts.mjs';
 
 const NOW = Date.UTC(2026, 9, 25, 12);
@@ -59,11 +59,11 @@ test('claudeWindows reads fixed windows, model-scoped limits and extra usage', (
   });
   assert.deepEqual(windows.map((w) => [w.id, w.label, w.usedPct, w.windowSec]), [
     ['five_hour', '5-hour', 42, 18000],
-    ['seven_day', 'Weekly', 0, 604800],
+    ['seven_day', 'Weekly', null, 604800],
     ['seven_day_opus', 'Weekly · Opus', 10, 604800],
     ['seven_day_sonnet', 'Weekly · Sonnet', 20, 604800],
     ['weekly_fable', 'Weekly · Fable', 70, 604800],
-    ['burst_haiku', 'Burst · Haiku', 0, null],
+    ['burst_haiku', 'Burst · Haiku', null, null],
     ['extra_usage', 'Extra usage · monthly', 12.5, null],
   ]);
   assert.equal(windows[0].resetsAt, Date.parse('2026-10-25T15:00:00Z'));
@@ -71,6 +71,20 @@ test('claudeWindows reads fixed windows, model-scoped limits and extra usage', (
   assert.equal(windows[4].shareOfWeeklyPct, 25);
   assert.equal(windows[5].shareOfWeeklyPct, null);
   assert.deepEqual(claudeWindows({ extra_usage: { is_enabled: false, utilization: 50 } }), []);
+});
+
+test('missing, null or non-numeric usage stays unknown instead of reading as 0', () => {
+  assert.deepEqual([42, 0, '12.5', ' 7 ', null, undefined, '', 'n/a', NaN, Infinity, true, {}, []].map(pct), [42, 0, 12.5, 7, null, null, null, null, null, null, null, null, null]);
+  const claude = claudeWindows({
+    five_hour: { utilization: null },
+    seven_day: { utilization: 'lots' },
+    seven_day_opus: { utilization: '30' },
+    limits: [{ group: 'weekly', percent: null, scope: { model: { display_name: 'Fable' } } }],
+    extra_usage: { is_enabled: true, utilization: 'n/a' },
+  });
+  assert.deepEqual(claude.map((w) => [w.id, w.usedPct]), [['five_hour', null], ['seven_day', null], ['seven_day_opus', 30], ['weekly_fable', null]]);
+  const codex = codexWindows({ rate_limit: { primary_window: { used_percent: null, limit_window_seconds: 18000 }, secondary_window: { used_percent: 'x', limit_window_seconds: 604800 } } }, NOW);
+  assert.deepEqual(codex.map((w) => w.usedPct), [null, null]);
 });
 
 test('claudePlan prefers the live profile and falls back to the saved subscription type', () => {
@@ -95,7 +109,7 @@ test('codexWindows labels every window shape the usage endpoint returns', () => 
   }, NOW);
   assert.deepEqual(windows.map((w) => [w.id, w.label, w.usedPct]), [
     ['primary', '5-hour', 30],
-    ['secondary', 'Weekly', 0],
+    ['secondary', 'Weekly', null],
     ['extra-0-primary', 'GPT-5 Pro · Monthly', 1],
     ['extra-1-secondary', 'Limit 2 · 2-day', 2],
     ['code-review-primary', 'Code review · 3-hour', 3],
@@ -186,6 +200,36 @@ test('failed accounts fall back to their last good reading and never leak tokens
   for (const text of [saved, JSON.stringify(first), JSON.stringify(second)]) {
     for (const token of ['claude-file-token', 'claude-proxy-token', codexToken]) assert.ok(!text.includes(token), token);
   }
+});
+
+test('an account whose usage is unreadable is not reported as limit reached', async (t) => {
+  const routes = structuredClone(healthyRoutes);
+  routes.claude['claude-proxy-token'] = { five_hour: { utilization: null }, seven_day: { utilization: 'full' } };
+  const { fetchImpl } = fakeFetch(routes);
+  const opts = await fixture(t, accountFiles);
+  const [claude] = (await createQuotaCollector({ ...opts, fetchImpl, now: () => NOW })(true)).accounts;
+  assert.deepEqual([claude.error, claude.limitReached, claude.windows.map((w) => w.usedPct)], [undefined, false, [null, null]]);
+});
+
+test('last-good.json is saved atomically and privately', async (t) => {
+  const { fetchImpl } = fakeFetch(healthyRoutes);
+  const opts = await fixture(t, accountFiles);
+  await createQuotaCollector({ ...opts, fetchImpl, now: () => NOW })(true);
+  assert.deepEqual(await readdir(path.dirname(opts.lastGoodFile)), ['last-good.json']);
+  assert.equal((await stat(opts.lastGoodFile)).mode & 0o777, 0o600);
+  assert.equal(Object.keys(JSON.parse(await readFile(opts.lastGoodFile, 'utf8'))).length, 2);
+});
+
+test('a failed last-good save is logged and the live readings are still returned', async (t) => {
+  const { fetchImpl } = fakeFetch(healthyRoutes);
+  const opts = await fixture(t, { ...accountFiles, blocker: 'a file, not a directory' });
+  const errors = t.mock.method(console, 'error', () => {});
+  const getQuotas = createQuotaCollector({ ...opts, lastGoodFile: path.join(opts.root, 'blocker', 'last-good.json'), fetchImpl, now: () => NOW });
+  const { accounts } = await getQuotas(true);
+  assert.deepEqual(accounts.map((a) => [a.provider, a.error ?? null, a.windows.length]), [['claude', null, 1], ['openai', null, 1]]);
+  assert.equal(errors.mock.callCount(), 1);
+  assert.match(errors.mock.calls[0].arguments[0], /Could not save the last good reading/);
+  assert.ok(!errors.mock.calls[0].arguments[0].includes('a@example.com'));
 });
 
 test('one provider failing keeps the other provider\'s accounts', async (t) => {

@@ -701,12 +701,17 @@
   }
 
   // Derive everything the UI shows about one window at the current moment.
+  // An unreadable usage figure stays unknown (left/used null, no level or projection), never "100% left".
   function view(w, now) {
-    let used = w.usedPct;
+    let used = Number.isFinite(w.usedPct) ? w.usedPct : null;
     let resetPassed = false;
     if (w.resetsAt && w.resetsAt <= now) { used = 0; resetPassed = true; }
-    const left = Math.max(0, Math.min(100, 100 - used));
     const toReset = w.resetsAt && !resetPassed ? (w.resetsAt - now) / 1000 : null;
+    if (used == null) {
+      const timeLeftPct = toReset != null && w.windowSec ? Math.max(0, Math.min(100, (toReset / w.windowSec) * 100)) : null;
+      return { used: null, left: null, unknown: true, toReset, notStarted: false, resetPassed, timeLeftPct, projectedLeft: null, runsOutIn: null, level: null };
+    }
+    const left = Math.max(0, Math.min(100, 100 - used));
     const notStarted = !resetPassed && used <= 0 && toReset != null && w.windowSec && toReset >= w.windowSec - 120;
     let timeLeftPct = null, projectedLeft = null, runsOutIn = null;
     if (toReset != null && w.windowSec && !notStarted) {
@@ -723,6 +728,7 @@
   }
 
   function statusLabel(v) {
+    if (v.unknown) return null;
     if (v.left <= 0) return { cls: 'critical', text: '⛔ Limit reached' };
     if (v.level === 'critical') return { cls: 'critical', text: '⛔ Nearly out' };
     if (v.level === 'warning') return { cls: 'warning', text: '⚠ Low' };
@@ -736,7 +742,10 @@
     return `resets in ${fmtDur(v.toReset)} · ${fmtClock(w.resetsAt)}`;
   }
 
+  const pctText = (n) => (n == null ? '—' : `${Math.round(n)}%`);
+
   function footText(v) {
+    if (v.unknown) return { text: 'Usage unknown' };
     if (v.resetPassed) return { text: 'Estimated. Refreshing…' };
     if (v.notStarted) return { text: 'Unused. The window starts when you send your first request.' };
     if (v.runsOutIn != null) return { text: `⚠ At this pace it runs out in ${fmtDur(v.runsOutIn)}, before the reset`, warn: true };
@@ -747,13 +756,14 @@
   function tipHtml(a, w, v) {
     const rows = [
       [`${a.name} ${a.plan || ''}`.trim(), w.label],
-      ['Left', `${Math.round(v.left)}%`],
-      ['Used', `${Math.round(v.used)}%`],
+      ['Left', pctText(v.left)],
+      ['Used', pctText(v.used)],
       ['Window', fmtWindow(w.windowSec)],
     ];
     if (w.shareOfWeeklyPct != null) rows.push(['Allowance', `${w.shareOfWeeklyPct}% of the weekly limit`]);
     if (w.resetsAt && !v.notStarted) rows.push(['Resets', fmtFull(w.resetsAt)]);
     if (v.timeLeftPct != null) rows.push(['Time left', `${Math.round(v.timeLeftPct)}% of window`]);
+    if (v.unknown) rows.push(['Reading', 'Usage unknown']);
     if (a.stale) rows.push(['Reading', `from ${ago(a.fetchedAt)}`]);
     return rows.map(([k, val]) => `<div><span class="k">${esc(k)}:</span> ${esc(val)}</div>`).join('');
   }
@@ -762,16 +772,16 @@
     const v = view(w, now);
     const st = statusLabel(v);
     const foot = footText(v);
-    const aria = `${w.label}: ${Math.round(v.left)} percent left, ${resetText(w, v)}`;
+    const aria = `${w.label}: ${v.unknown ? 'usage unknown' : `${Math.round(v.left)} percent left`}, ${resetText(w, v)}`;
     return `
       <div class="win" tabindex="0" data-a="${ai}" data-w="${wi}" aria-label="${esc(aria)}">
         <div class="win-top"><span class="win-label">${esc(w.label)}</span><span class="win-reset">${esc(resetText(w, v))}</span></div>
         <div class="win-main">
-          <span class="big">${Math.round(v.left)}%</span><span class="big-unit">left</span>
+          <span class="big">${pctText(v.left)}</span><span class="big-unit">left</span>
           ${st ? `<span class="status ${st.cls}">${st.text}</span>` : ''}
         </div>
         <div class="meter ${v.level || ''}" aria-hidden="true">
-          <div class="fill" style="width:${v.left}%"></div>
+          ${v.unknown ? '' : `<div class="fill" style="width:${v.left}%"></div>`}
           ${v.timeLeftPct != null ? `<div class="pace" style="left:${v.timeLeftPct}%"></div>` : ''}
         </div>
         <div class="win-foot ${foot.warn ? 'warn' : ''}">${esc(foot.text)}</div>
@@ -811,10 +821,10 @@
         return `<tr>
           <td>${esc(a.name)} ${esc(a.plan || '')}<br><span style="color:var(--ink-muted)">${esc(a.email || '')}</span></td>
           <td>${esc(w.label)}</td>
-          <td class="num">${Math.round(v.left)}%</td>
-          <td class="num">${Math.round(v.used)}%</td>
+          <td class="num">${pctText(v.left)}</td>
+          <td class="num">${pctText(v.used)}</td>
           <td>${esc(resetText(w, v) || '–')}</td>
-          <td>${st ? esc(st.text) : 'OK'}${a.stale ? ` (reading from ${esc(ago(a.fetchedAt))})` : ''}</td>
+          <td>${st ? esc(st.text) : v.unknown ? 'Usage unknown' : 'OK'}${a.stale ? ` (reading from ${esc(ago(a.fetchedAt))})` : ''}</td>
         </tr>`;
       }),
     );
@@ -837,8 +847,11 @@
       : `<div class="grid">${data.accounts.map((a, ai) => renderCard(a, now, ai)).join('')}</div>`;
     $('legend').hidden = tableView;
 
-    // Tab title: the tightest window per account, e.g. "25% · 95%".
-    const tight = data.accounts.filter((a) => a.windows?.length).map((a) => Math.round(Math.min(...a.windows.map((w) => view(w, now).left))));
+    // Tab title: the tightest known window per account, e.g. "25% · 95%". Unknown windows are skipped.
+    const tight = data.accounts
+      .map((a) => (a.windows || []).map((w) => view(w, now).left).filter((left) => left != null))
+      .filter((lefts) => lefts.length)
+      .map((lefts) => Math.round(Math.min(...lefts)));
     document.title = tight.length ? `${tight.map((n) => `${n}%`).join(' · ')} · Quotas` : 'Quotas';
 
     // Once a live window passes its reset time, fetch fresh numbers shortly after.
