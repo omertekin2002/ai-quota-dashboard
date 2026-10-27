@@ -744,9 +744,10 @@
 
   const pctText = (n) => (n == null ? '—' : `${Math.round(n)}%`);
 
-  function footText(v) {
+  // Stale accounts get no automatic reload (see render()), so their footer must not promise one.
+  function footText(v, stale) {
     if (v.unknown) return { text: 'Usage unknown' };
-    if (v.resetPassed) return { text: 'Estimated. Refreshing…' };
+    if (v.resetPassed) return { text: stale ? 'Estimated: reset since this reading' : 'Estimated. Refreshing…' };
     if (v.notStarted) return { text: 'Unused. The window starts when you send your first request.' };
     if (v.runsOutIn != null) return { text: `⚠ At this pace it runs out in ${fmtDur(v.runsOutIn)}, before the reset`, warn: true };
     if (v.projectedLeft != null) return { text: `At this pace, about ${Math.round(v.projectedLeft)}% left at reset` };
@@ -771,7 +772,7 @@
   function renderWindow(a, w, now, ai, wi) {
     const v = view(w, now);
     const st = statusLabel(v);
-    const foot = footText(v);
+    const foot = footText(v, a.stale);
     const aria = `${w.label}: ${v.unknown ? 'usage unknown' : `${Math.round(v.left)} percent left`}, ${resetText(w, v)}`;
     return `
       <div class="win" tabindex="0" data-a="${ai}" data-w="${wi}" aria-label="${esc(aria)}">
