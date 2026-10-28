@@ -166,6 +166,43 @@ for (const [name, setup, message] of refusals) {
   });
 }
 
+// Changes made to the checkout while `git fetch` runs, through a `git` wrapper
+// on PATH that runs the change right after the real fetch.
+const midFetch = [
+  ['switches to another branch', (g) => `${g} checkout --quiet -b feature`, (f, old) => {
+    assert.equal(git(f.work, 'rev-parse', 'refs/heads/feature'), old);
+    assert.equal(git(f.work, 'rev-parse', 'refs/heads/main'), old);
+  }, /on branch 'feature', not 'main'/],
+  ['commits on main', (g) => `echo x > local.txt && ${g} add local.txt && ${g} commit --quiet -m local`, (f, old) => {
+    assert.equal(git(f.work, 'rev-parse', 'HEAD~1'), old);
+  }, /main moved from .* while fetching/],
+  ['edits a tracked file', () => 'echo edit > README.md', (f, old) => {
+    assert.equal(fs.readFileSync(path.join(f.work, 'README.md'), 'utf8'), 'edit\n');
+    assert.equal(f.head(), old);
+  }, /local changes/],
+];
+
+for (const [name, change, check, message] of midFetch) {
+  test(`refuses when someone ${name} during the fetch`, async (t) => {
+    const f = fixture(t);
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    fs.writeFileSync(path.join(f.bin, 'git'), [
+      '#!/bin/sh',
+      'for a in "$@"; do [ "$a" = fetch ] && is_fetch=1; done',
+      `"${realGit}" "$@" || exit $?`,
+      `[ -z "$is_fetch" ] || (cd '${f.work}' && ${change(JSON.stringify(realGit))})`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+    const old = f.head();
+    f.advanceOrigin();
+    const r = await f.update();
+    assert.notEqual(r.code, 0);
+    assert.match(r.stderr, message);
+    check(f, old);
+    assert.deepEqual(f.calls(), []);
+  });
+}
+
 test('ignored files do not block an update and survive it', async (t) => {
   const f = fixture(t);
   const cache = path.join(f.work, '.cache', 'last-good.json');

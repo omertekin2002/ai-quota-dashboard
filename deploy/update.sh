@@ -33,16 +33,25 @@ fi
 
 g() { git -C "$repo" "$@"; }
 
-[[ -d $repo ]] || refuse "$repo does not exist"
-current=$(g symbolic-ref --quiet --short HEAD) || refuse "$repo is not on a branch (detached HEAD)"
-[[ $current == "$branch" ]] || refuse "$repo is on branch '$current', not '$branch'"
-changes=$(g status --porcelain --untracked-files=all)
-[[ -z $changes ]] || refuse "$repo has local changes:"$'\n'"$changes"
+# Refuses unless the checkout is on $branch at commit $1 with nothing changed.
+check_checkout() {
+  local current changes
+  current=$(g symbolic-ref --quiet --short HEAD) || refuse "$repo is not on a branch (detached HEAD)"
+  [[ $current == "$branch" ]] || refuse "$repo is on branch '$current', not '$branch'"
+  [[ -z $1 || $(g rev-parse --verify HEAD) == "$1" ]] || refuse "$branch moved from ${1:0:7} while fetching"
+  changes=$(g status --porcelain --untracked-files=all)
+  [[ -z $changes ]] || refuse "$repo has local changes:"$'\n'"$changes"
+}
 
+[[ -d $repo ]] || refuse "$repo does not exist"
+check_checkout ''
 old=$(g rev-parse --verify HEAD)
 timeout --kill-after=5 "$fetch_timeout" git -C "$repo" fetch --quiet --no-tags "$remote" "$branch" \
   || refuse "git fetch $remote $branch failed or timed out after ${fetch_timeout}s"
 target=$(g rev-parse --verify 'FETCH_HEAD^{commit}')
+# The fetch can take a while: check again that nobody switched branch,
+# committed or edited files in the meantime.
+check_checkout "$old"
 
 # Set between the fast-forward and a successful restart, so a failed restart
 # is retried by the next run even though HEAD no longer moves.

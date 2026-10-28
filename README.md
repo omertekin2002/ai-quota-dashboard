@@ -124,7 +124,7 @@ On hp-laptop, the dashboard runs from `~/ai-quota-dashboard` as the `ai-quota-da
 
 1. takes a lock, so runs can't overlap; a run that finds the lock held exits without doing anything;
 2. refuses, changing nothing and exiting non-zero (so `systemctl --user --failed` shows it), when the checkout isn't on `main`, has any tracked or untracked change, or has commits `origin/main` doesn't have. Ignored files such as `.cache/` don't count;
-3. runs `git fetch origin main` with a 60-second timeout and no prompts, then `git merge --ff-only`. It never resets, rebases, stashes, checks out or cleans anything;
+3. runs `git fetch origin main` with a 60-second timeout and no prompts, checks the checkout again (refusing if the branch, `HEAD` or any file changed during the fetch), then runs `git merge --ff-only`. It never resets, rebases, stashes, checks out or cleans anything;
 4. restarts `ai-quota-dashboard.service` only if `HEAD` moved, and logs `old → new` short SHAs. If that restart fails, the next run retries it.
 
 A bad commit on `main` therefore goes live within about 15 minutes of the merge.
