@@ -21,6 +21,13 @@ For each account and limit window, including model-specific ones such as Claude'
 
 Hover a window for exact numbers. The **Table** button shows everything as a table. The page updates every 2 minutes, and the tab title shows the tightest window per account.
 
+The line under **Quotas** also shows which commit the server is running, linked on GitHub. It adds a text warning when that isn't the latest code:
+
+- **⚠ Restart needed to run `<sha>`**: the checkout on disk has moved to a newer commit, but the process wasn't restarted. HEAD on disk is re-read at most once a minute.
+- **⚠ Running `<sha>`, main is at `<sha>`**: `main` on GitHub has moved on. This is checked with a read-only `git ls-remote origin refs/heads/main` at most once every 15 minutes (15-second timeout). It never fetches, pulls or writes to the checkout. If the check fails, the last known value stays.
+
+Without git or a `.git` directory, the version is unknown and the line shows nothing extra.
+
 ## Agent pipeline
 
 The **Agent pipeline** panel shows the state of the [build-workflow](https://github.com/omertekin2002/build-workflow) agent pipeline for every repo in its scope. Repos excluded in its `config.json` don't appear. Everything links to GitHub.
@@ -77,9 +84,9 @@ History is stored atomically in `.cache/workspace-history.json`: up to 100 event
 
 Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process memory, filesystem space, NetworkManager, and Tailscale status, and makes bounded HTTP(S) checks. It never controls services or changes power/network settings. The monitored units are listed in `workspace.mjs`, and health endpoints in `diagnostics.mjs`; unsupported operating systems still show quotas normally. No new packages or elevated privileges are needed.
 
-Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s.
+Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s. `test/deploy.test.mjs` runs `deploy/update.sh` against a temporary git origin and clone with a fake `systemctl`, and `deploy/install.sh` against a temporary home.
 
-GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`.
+GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and `deploy/` scripts, and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`.
 
 ## Where the credentials come from
 
@@ -111,6 +118,27 @@ The dashboard is tailnet-only: by the owner's decision ([#7](https://github.com/
 tailscale serve --bg --https=8443 http://127.0.0.1:7417
 ```
 
+## Keeping hp-laptop up to date
+
+On hp-laptop, the dashboard runs from `~/ai-quota-dashboard` as the `ai-quota-dashboard.service` user unit. A user timer keeps it on the latest `main` (owner's decision [#17](https://github.com/omertekin2002/ai-quota-dashboard/issues/17)). Every 15 minutes, `ai-quota-dashboard-update.timer` runs `deploy/update.sh`, which:
+
+1. takes a lock, so runs can't overlap; a run that finds the lock held exits without doing anything;
+2. refuses, changing nothing and exiting non-zero (so `systemctl --user --failed` shows it), when the checkout isn't on `main`, has any tracked or untracked change, or has commits `origin/main` doesn't have. Ignored files such as `.cache/` don't count;
+3. runs `git fetch origin main` with a 60-second timeout and no prompts, checks the checkout again (refusing if the branch, `HEAD` or any file changed during the fetch), then runs `git merge --ff-only`. It never resets, rebases, stashes, checks out or cleans anything;
+4. restarts `ai-quota-dashboard.service` only if `HEAD` moved, and logs `old → new` short SHAs. If that restart fails, the next run retries it.
+
+A bad commit on `main` therefore goes live within about 15 minutes of the merge.
+
+```sh
+deploy/install.sh                                         # install or update (no sudo, safe to re-run)
+systemctl --user list-timers ai-quota-dashboard-update.timer
+systemctl --user start ai-quota-dashboard-update.service  # run once now
+journalctl --user -u ai-quota-dashboard-update -n 20      # what it did
+systemctl --user disable --now ai-quota-dashboard-update.timer  # pause it
+```
+
+`install.sh` copies `update.sh` to `~/.local/lib/ai-quota-dashboard-update/` and the two units to `~/.config/systemd/user/`, then enables the timer. It doesn't touch `ai-quota-dashboard.service` or Tailscale. The timer runs the installed copy, not the checkout's, so **re-run `deploy/install.sh` after changing anything in `deploy/`**. To remove it, disable the timer, delete those files, and run `systemctl --user daemon-reload`. To pin the dashboard to a commit, disable the timer and check that commit out by hand.
+
 ## Notes
 
 - **Tokens are never refreshed or written back.** Both providers' refresh tokens are one-time-use, so refreshing them here would log the CLIs out. When a token has expired, the card shows the last successful reading, marked as old, until you run `claude` or `codex` once.
@@ -119,6 +147,8 @@ tailscale serve --bg --https=8443 http://127.0.0.1:7417
 - The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1` or listed in `ALLOWED_HOSTS`. That stops other websites from reading it through DNS rebinding.
 - When a request fails, the reply is a generic `{"error":"internal error"}` with status 500; the real error is logged by the server only, so paths or tokens in error messages never reach the browser.
 - Upstream calls are cached for 90 seconds, and the Claude plan lookup for 15 minutes. Pressing **Refresh** bypasses both, at most once every 15 seconds.
+- `GET /healthz` returns `{"ok":true, "commit", "startedAt", "uptimeSec", …}` with the version fields above (short SHAs and flags, no paths, remote URLs or error text). It reads cached state only, so it stays cheap and never runs a collector. `GET /api/version` returns the version fields alone. Both obey the `Host` allow-list.
+- On `SIGTERM` or `SIGINT` (e.g. `systemctl --user stop`), the server stops accepting connections, closes idle keep-alive ones, lets open requests finish and exits with code 0. If requests are still open after 4 seconds, it exits anyway. Workspace history is written to a temp file and renamed into place, so stopping mid-write never corrupts it.
 
 | Env var | Default |
 |---|---|
