@@ -21,6 +21,13 @@ For each account and limit window, including model-specific ones such as Claude'
 
 Hover a window for exact numbers. The **Table** button shows everything as a table. The page updates every 2 minutes, and the tab title shows the tightest window per account.
 
+The line under **Quotas** also shows which commit the server is running, linked on GitHub. It adds a text warning when that isn't the latest code:
+
+- **⚠ Restart needed to run `<sha>`**: the checkout on disk has moved to a newer commit, but the process wasn't restarted. HEAD on disk is re-read at most once a minute.
+- **⚠ Running `<sha>`, main is at `<sha>`**: `main` on GitHub has moved on. This is checked with a read-only `git ls-remote origin refs/heads/main` at most once every 15 minutes (15-second timeout). It never fetches, pulls or writes to the checkout. If the check fails, the last known value stays.
+
+Without git or a `.git` directory, the version is unknown and the line shows nothing extra.
+
 ## Agent pipeline
 
 The **Agent pipeline** panel shows the state of the [build-workflow](https://github.com/omertekin2002/build-workflow) agent pipeline for every repo in its scope. Repos excluded in its `config.json` don't appear. Everything links to GitHub.
@@ -119,6 +126,8 @@ tailscale serve --bg --https=8443 http://127.0.0.1:7417
 - The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1` or listed in `ALLOWED_HOSTS`. That stops other websites from reading it through DNS rebinding.
 - When a request fails, the reply is a generic `{"error":"internal error"}` with status 500; the real error is logged by the server only, so paths or tokens in error messages never reach the browser.
 - Upstream calls are cached for 90 seconds, and the Claude plan lookup for 15 minutes. Pressing **Refresh** bypasses both, at most once every 15 seconds.
+- `GET /healthz` returns `{"ok":true, "commit", "startedAt", "uptimeSec", …}` with the version fields above (short SHAs and flags, no paths, remote URLs or error text). It reads cached state only, so it stays cheap and never runs a collector. `GET /api/version` returns the version fields alone. Both obey the `Host` allow-list.
+- On `SIGTERM` or `SIGINT` (e.g. `systemctl --user stop`), the server stops accepting connections, closes idle keep-alive ones, lets open requests finish and exits with code 0. If requests are still open after 4 seconds, it exits anyway. Workspace history is written to a temp file and renamed into place, so stopping mid-write never corrupts it.
 
 | Env var | Default |
 |---|---|
