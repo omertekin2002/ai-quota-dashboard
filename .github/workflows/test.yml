@@ -32,5 +32,9 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Syntax-check modules
         run: for f in *.mjs; do node --check "$f"; done
+      - name: Check deploy scripts
+        run: |
+          for f in deploy/*.sh; do bash -n "$f"; done
+          shellcheck deploy/*.sh
       - name: Run tests
         run: npm test

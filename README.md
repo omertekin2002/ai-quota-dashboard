@@ -84,9 +84,9 @@ History is stored atomically in `.cache/workspace-history.json`: up to 100 event
 
 Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process memory, filesystem space, NetworkManager, and Tailscale status, and makes bounded HTTP(S) checks. It never controls services or changes power/network settings. The monitored units are listed in `workspace.mjs`, and health endpoints in `diagnostics.mjs`; unsupported operating systems still show quotas normally. No new packages or elevated privileges are needed.
 
-Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s.
+Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s. `test/deploy.test.mjs` runs `deploy/update.sh` against a temporary git origin and clone with a fake `systemctl`, and `deploy/install.sh` against a temporary home.
 
-GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`.
+GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and `deploy/` scripts, and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`.
 
 ## Where the credentials come from
 
@@ -117,6 +117,27 @@ The dashboard is tailnet-only: by the owner's decision ([#7](https://github.com/
 ```sh
 tailscale serve --bg --https=8443 http://127.0.0.1:7417
 ```
+
+## Keeping hp-laptop up to date
+
+On hp-laptop, the dashboard runs from `~/ai-quota-dashboard` as the `ai-quota-dashboard.service` user unit. A user timer keeps it on the latest `main` (owner's decision [#17](https://github.com/omertekin2002/ai-quota-dashboard/issues/17)). Every 15 minutes, `ai-quota-dashboard-update.timer` runs `deploy/update.sh`, which:
+
+1. takes a lock, so runs can't overlap; a run that finds the lock held exits without doing anything;
+2. refuses, changing nothing and exiting non-zero (so `systemctl --user --failed` shows it), when the checkout isn't on `main`, has any tracked or untracked change, or has commits `origin/main` doesn't have. Ignored files such as `.cache/` don't count;
+3. runs `git fetch origin main` with a 60-second timeout and no prompts, checks the checkout again (refusing if the branch, `HEAD` or any file changed during the fetch), then runs `git merge --ff-only`. It never resets, rebases, stashes, checks out or cleans anything;
+4. restarts `ai-quota-dashboard.service` only if `HEAD` moved, and logs `old → new` short SHAs. If that restart fails, the next run retries it.
+
+A bad commit on `main` therefore goes live within about 15 minutes of the merge.
+
+```sh
+deploy/install.sh                                         # install or update (no sudo, safe to re-run)
+systemctl --user list-timers ai-quota-dashboard-update.timer
+systemctl --user start ai-quota-dashboard-update.service  # run once now
+journalctl --user -u ai-quota-dashboard-update -n 20      # what it did
+systemctl --user disable --now ai-quota-dashboard-update.timer  # pause it
+```
+
+`install.sh` copies `update.sh` to `~/.local/lib/ai-quota-dashboard-update/` and the two units to `~/.config/systemd/user/`, then enables the timer. It doesn't touch `ai-quota-dashboard.service` or Tailscale. The timer runs the installed copy, not the checkout's, so **re-run `deploy/install.sh` after changing anything in `deploy/`**. To remove it, disable the timer, delete those files, and run `systemctl --user daemon-reload`. To pin the dashboard to a commit, disable the timer and check that commit out by hand.
 
 ## Notes
 
