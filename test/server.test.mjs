@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -147,4 +147,113 @@ test('a malformed request URL gets 400 and the server keeps running', async (t) 
   assert.equal((await get('/api/quotas')).status, 200);
   assert.deepEqual(calls.quotas, [false]);
   assert.equal(logged.length, 0);
+});
+
+const VERSION = {
+  commit: 'aaaaaaa', startedAt: 1_000_000, diskCommit: 'bbbbbbb', upstreamCommit: 'ccccccc',
+  upstreamCheckedAt: 1_000_000, upstreamError: false, restartNeeded: true, behindUpstream: true,
+};
+
+test('/healthz answers from cached state without calling a collector', async (t) => {
+  let versionCalls = 0;
+  const { get, calls } = await start(t, { getVersion: () => (versionCalls++, VERSION) });
+  for (const pathname of ['/healthz', '/healthz?force']) {
+    const res = await get(pathname);
+    assert.equal(res.status, 200, pathname);
+    assert.equal(res.headers['content-type'], 'application/json');
+    assert.equal(res.headers['cache-control'], 'no-store');
+    const body = JSON.parse(res.body);
+    assert.equal(body.ok, true);
+    assert.deepEqual({ ...body, ok: undefined, uptimeSec: undefined }, { ...VERSION, ok: undefined, uptimeSec: undefined });
+    assert.ok(Number.isInteger(body.uptimeSec) && body.uptimeSec >= 0);
+  }
+  assert.equal(versionCalls, 2);
+  assert.deepEqual(calls, { quotas: [], workspace: [], pipeline: [] });
+});
+
+test('/healthz and /api/version get 403 for other hosts', async (t) => {
+  let versionCalls = 0;
+  const { get } = await start(t, { getVersion: () => (versionCalls++, VERSION) });
+  for (const pathname of ['/healthz', '/api/version']) {
+    const res = await get(pathname, 'evil.example');
+    assert.equal(res.status, 403);
+    assert.equal(res.body, '');
+  }
+  assert.equal(versionCalls, 0);
+});
+
+test('/api/version returns the version state, and an unknown version without a monitor', async (t) => {
+  const { get } = await start(t, { getVersion: () => VERSION });
+  const res = await get('/api/version');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['cache-control'], 'no-store');
+  assert.deepEqual(JSON.parse(res.body), VERSION);
+
+  const plain = await start(t);
+  const health = JSON.parse((await plain.get('/healthz')).body);
+  assert.equal(health.ok, true);
+  assert.equal(health.commit, null);
+  assert.equal(JSON.parse((await plain.get('/api/version')).body).commit, null);
+});
+
+test('the real /healthz output carries no paths, remote URLs or error text', async (t) => {
+  const { createVersionMonitor } = await import('../version.mjs');
+  // A git that fails loudly, mentioning a path and a remote URL.
+  const monitor = createVersionMonitor({
+    repoDir: '/home/someone/checkout',
+    run: async () => { throw new Error('fatal: could not read from https://token@github.example/x.git at /home/someone/checkout'); },
+  });
+  await monitor.start();
+  await monitor.refresh();
+  const { get } = await start(t, { getVersion: monitor.snapshot });
+  for (const pathname of ['/healthz', '/api/version']) {
+    const { body } = await get(pathname);
+    for (const leak of ['fatal', '/home', 'github.example', 'token', 'https:']) assert.ok(!body.includes(leak), `${pathname}: ${leak}`);
+    assert.equal(JSON.parse(body).commit, null);
+  }
+});
+
+test('SIGTERM stops a running `node server.mjs` with exit code 0 within 5 seconds', { timeout: 30_000 }, async () => {
+  const child = spawn(process.execPath, ['server.mjs'], {
+    cwd: ROOT,
+    // Port 0 picks a free port; a missing agentctl keeps the test off GitHub.
+    env: { ...process.env, PORT: '0', AGENTCTL: path.join(ROOT, 'test', 'no-such-agentctl') },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+  try {
+    let out = '';
+    child.stdout.setEncoding('utf8');
+    const port = await new Promise((resolve, reject) => {
+      child.stdout.on('data', (chunk) => {
+        out += chunk;
+        const m = out.match(/localhost:(\d+)/);
+        if (m) resolve(Number(m[1]));
+      });
+      exited.then(() => reject(new Error(`server exited early: ${out}`)));
+    });
+    // Hold a keep-alive connection open, the way a browser tab does.
+    const agent = new http.Agent({ keepAlive: true });
+    const health = await new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: '/healthz', headers: { Host: 'localhost' }, agent }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      }).on('error', reject);
+    });
+    assert.equal(health.status, 200);
+    const head = (await promisify(execFile)('git', ['rev-parse', '--short=7', 'HEAD'], { cwd: ROOT }).catch(() => null))?.stdout.trim() ?? null;
+    assert.equal(JSON.parse(health.body).commit, head);
+
+    const sentAt = Date.now();
+    child.kill('SIGTERM');
+    const { code, signal } = await exited;
+    assert.equal(signal, null);
+    assert.equal(code, 0);
+    assert.ok(Date.now() - sentAt < 5000, `took ${Date.now() - sentAt} ms`);
+    agent.destroy();
+  } finally {
+    child.kill('SIGKILL');
+  }
 });

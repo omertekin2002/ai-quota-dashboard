@@ -16,15 +16,23 @@ import { createQuotaCollector } from './quotas.mjs';
 import { parseAllowedHosts, isAllowedHost } from './hosts.mjs';
 import { getWorkspaceStatus, startWorkspaceMonitoring } from './workspace.mjs';
 import { getPipelineOverview, startPipelineOverview } from './pipeline-overview.mjs';
+import { createVersionMonitor, startVersionMonitoring } from './version.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+const UNKNOWN_VERSION = { commit: null, startedAt: null, restartNeeded: false, behindUpstream: false };
+
 // Returns an http.Server that isn't listening yet. The collectors are injected so tests can use fakes.
+// `getVersion` returns cached state only (see version.mjs), so /healthz never waits on git or a collector.
 export function createDashboardServer({
-  getQuotas, getWorkspaceStatus, getPipelineOverview,
+  getQuotas, getWorkspaceStatus, getPipelineOverview, getVersion = () => UNKNOWN_VERSION,
   allowedHosts = parseAllowedHosts(), indexFile = path.join(HERE, 'index.html'), log = console.error,
 }) {
-  const api = { '/api/quotas': getQuotas, '/api/workspace': getWorkspaceStatus, '/api/pipeline': getPipelineOverview };
+  const api = {
+    '/api/quotas': getQuotas, '/api/workspace': getWorkspaceStatus, '/api/pipeline': getPipelineOverview,
+    '/api/version': async () => getVersion(),
+    '/healthz': async () => ({ ok: true, ...getVersion(), uptimeSec: Math.floor(process.uptime()) }),
+  };
   return http.createServer(async (req, res) => {
     // Only answer requests addressed to known hosts, so other websites can't read this via DNS rebinding.
     if (!isAllowedHost(req.headers.host, allowedHosts)) {
@@ -76,16 +84,37 @@ async function main(argv = process.argv) {
     process.exit(0);
   }
 
+  const version = createVersionMonitor();
+  await version.start();
   const server = createDashboardServer({
-    getQuotas, getWorkspaceStatus, getPipelineOverview,
+    getQuotas, getWorkspaceStatus, getPipelineOverview, getVersion: version.snapshot,
     // Extra Host names to answer to, e.g. the MagicDNS name when published with `tailscale serve`.
     allowedHosts: parseAllowedHosts(process.env.ALLOWED_HOSTS),
   });
+  const timers = [];
   server.listen(port, '127.0.0.1', () => {
-    console.log(`AI quota dashboard → http://localhost:${port}`);
-    startWorkspaceMonitoring();
-    startPipelineOverview();
+    console.log(`AI quota dashboard → http://localhost:${server.address().port}`);
+    timers.push(startWorkspaceMonitoring(), startPipelineOverview(), startVersionMonitoring(version));
   });
+
+  // systemd stops the service with SIGTERM. Stop taking requests, let open ones finish, then exit 0.
+  // Workspace history is written to a temp file and renamed into place, so there's nothing buffered to flush
+  // and an exit mid-write leaves the previous history intact.
+  let stopping = false;
+  function shutdown(signal) {
+    if (stopping) return;
+    stopping = true;
+    console.log(`${signal} received, shutting down`);
+    for (const timer of timers) clearInterval(timer);
+    server.close(() => process.exit(0));
+    server.closeIdleConnections?.(); // keep-alive sockets would otherwise hold close() open (Node < 19)
+    // Don't let a slow request hold up the stop.
+    setTimeout(() => {
+      console.error('Requests still open after 4 seconds; exiting anyway');
+      process.exit(0);
+    }, 4000).unref();
+  }
+  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => shutdown(signal));
 }
 
 // True when this file is the program being run (`node server.mjs`), not an import.

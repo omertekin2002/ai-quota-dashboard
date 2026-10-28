@@ -55,6 +55,9 @@
   .top { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 24px; }
   .top h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
   .top .meta { color: var(--ink-muted); font-size: 13px; margin-top: 2px; }
+  .top .meta a { color: inherit; }
+  .top .meta code { font-size: 12px; }
+  .version-warn { color: var(--warning-ink); }
   .top .actions { margin-left: auto; display: flex; gap: 8px; }
   button {
     font: inherit; font-size: 13px; color: var(--ink-1); background: var(--surface);
@@ -287,6 +290,7 @@
   let tableView = false;
   let loading = false;
   let reloadTimer = null;
+  let version = null; // which commit the server runs, from /api/version
   let workspace = null;
   let workspaceLoading = false;
   let workspaceError = false;
@@ -834,10 +838,24 @@
       <tbody>${rows.join('')}</tbody></table></div>`;
   }
 
+  // The running commit, linked on GitHub, plus a text warning when the server isn't running the latest code.
+  const REPO_URL = 'https://github.com/omertekin2002/ai-quota-dashboard';
+  function versionHtml(v) {
+    if (!v?.commit) return '';
+    const sha = (s) => (/^[0-9a-f]{7,64}$/.test(s) ? ghLink(`${REPO_URL}/commit/${s}`, `<code>${s}</code>`) : `<code>${esc(s)}</code>`);
+    const warnings = [];
+    if (v.restartNeeded && v.diskCommit) warnings.push(`⚠ Restart needed to run ${sha(v.diskCommit)}`);
+    // When a restart would already bring it up to main, the restart warning says enough.
+    if (v.behindUpstream && v.upstreamCommit && !(v.restartNeeded && v.diskCommit === v.upstreamCommit)) {
+      warnings.push(`⚠ Running ${sha(v.commit)}, main is at ${sha(v.upstreamCommit)}`);
+    }
+    return ` · running ${sha(v.commit)}${warnings.map((w) => ` · <span class="version-warn">${w}</span>`).join('')}`;
+  }
+
   function render() {
     if (!data) return;
     const now = Date.now();
-    $('meta').textContent = `Claude & ChatGPT · updated ${ago(data.generatedAt)}`;
+    $('meta').innerHTML = `Claude &amp; ChatGPT · updated ${esc(ago(data.generatedAt))}${versionHtml(version)}`;
     if (!data.accounts.length) {
       $('content').innerHTML = `<div class="empty">No Claude or ChatGPT logins found. Sign in with <code>claude</code> or <code>codex</code>, or add accounts to CLIProxyAPI (<code>~/.cli-proxy-api</code>).</div>`;
       $('legend').hidden = true;
@@ -863,6 +881,8 @@
   async function load(force = false) {
     if (loading) return;
     loading = true;
+    // Optional: an older server has no /api/version, and a failed read keeps the last one.
+    const versionReq = fetch('/api/version', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
     try {
       const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -871,6 +891,7 @@
     } catch (err) {
       $('banner').innerHTML = `<div class="banner">Can't reach the quota server (${esc(err.message)}). Is <code>node server.mjs</code> running?</div>`;
     } finally {
+      version = (await versionReq) || version;
       loading = false;
       render();
     }

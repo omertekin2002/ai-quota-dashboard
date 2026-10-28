@@ -8,7 +8,7 @@ const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
 
 // Run index.html's script in a vm with stub DOM elements and canned API replies.
 // Pass `now` to pin Date (and Date.now) inside the page, so durations and percentages are deterministic.
-async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, now, hidden = () => false } = {}) {
+async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false } = {}) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
@@ -27,7 +27,10 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   };
   const globals = {
     document,
-    fetch: async (url) => ({ ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? workspace : pipeline) }),
+    // `version: null` answers /api/version with a 404, like a server from before it existed.
+    fetch: async (url) => (url.startsWith('/api/version')
+      ? { ok: version != null, status: version != null ? 200 : 404, json: async () => version }
+      : { ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? workspace : pipeline) }),
     AbortSignal, setInterval() {}, innerWidth: 1280, innerHeight: 800,
     setTimeout: (fn, ms) => { timeouts.push(ms); return timeouts.length; },
   };
@@ -367,4 +370,45 @@ test('the tooltip lists exact numbers for a window, plus its share of the weekly
   assert.ok(share.includes('<div><span class="k">Window:</span> 7 days</div><div><span class="k">Allowance:</span> 25% of the weekly limit</div>'), share);
   assert.ok(share.includes('<span class="k">Time left:</span> 50% of window'), share);
   for (const text of [tip, share]) assertClean(text);
+});
+
+test('the meta line shows the running commit and warns in text when it is not current', async () => {
+  const base = { commit: 'abc1234', startedAt: 1, diskCommit: 'abc1234', upstreamCommit: 'abc1234', upstreamCheckedAt: 1, upstreamError: false, restartNeeded: false, behindUpstream: false };
+  const meta = async (version) => (await loadDashboard({ version })).element('meta').innerHTML;
+  const link = (sha) => `<a href="https://github.com/omertekin2002/ai-quota-dashboard/commit/${sha}" target="_blank" rel="noopener noreferrer"><code>${sha}</code></a>`;
+
+  const current = await meta(base);
+  assert.ok(current.startsWith('Claude &amp; ChatGPT · updated '), current);
+  assert.ok(current.endsWith(` · running ${link('abc1234')}`), current);
+  assert.ok(!current.includes('⚠'));
+
+  const restart = await meta({ ...base, diskCommit: 'def5678', upstreamCommit: 'def5678', restartNeeded: true, behindUpstream: true });
+  assert.ok(restart.includes(`<span class="version-warn">⚠ Restart needed to run ${link('def5678')}</span>`), restart);
+  // A restart would bring it up to main, so no second warning.
+  assert.equal(restart.split('⚠').length - 1, 1);
+
+  const behind = await meta({ ...base, upstreamCommit: '9876fed', behindUpstream: true });
+  assert.ok(behind.includes(`<span class="version-warn">⚠ Running ${link('abc1234')}, main is at ${link('9876fed')}</span>`), behind);
+  assert.ok(!behind.includes('Restart'));
+
+  const both = await meta({ ...base, diskCommit: 'def5678', upstreamCommit: '9876fed', restartNeeded: true, behindUpstream: true });
+  assert.ok(both.includes('⚠ Restart needed to run') && both.includes('main is at'), both);
+
+  // Unknown version (no git, or an older server with no /api/version): nothing extra.
+  for (const version of [{ ...base, commit: null, restartNeeded: false, behindUpstream: false }, null]) {
+    const html = await meta(version);
+    assert.ok(!html.includes('running') && !html.includes('⚠'), html);
+  }
+});
+
+test('the version line escapes anything that is not a SHA and links only real SHAs', async () => {
+  const { element } = await loadDashboard({ version: {
+    commit: '<img src=x onerror=alert(1)>', diskCommit: '"><script>bad()</script>', upstreamCommit: 'abc1234',
+    restartNeeded: true, behindUpstream: true,
+  } });
+  const html = element('meta').innerHTML;
+  assert.ok(!html.includes('<img') && !html.includes('<script'), html);
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'));
+  assert.ok(html.includes('&quot;&gt;&lt;script&gt;bad()&lt;/script&gt;'));
+  assert.equal(html.match(/<a /g).length, 1); // only the real SHA, abc1234, is a link
 });
