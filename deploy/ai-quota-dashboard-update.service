@@ -1,0 +1,9 @@
+[Unit]
+Description=Fast-forward ai-quota-dashboard from origin/main and restart it if the commit changed
+Documentation=https://github.com/omertekin2002/ai-quota-dashboard#keeping-hp-laptop-up-to-date
+
+[Service]
+Type=oneshot
+# The installed copy (deploy/install.sh), so the checkout can move under it.
+ExecStart=%h/.local/lib/ai-quota-dashboard-update/update.sh
+TimeoutStartSec=3min
