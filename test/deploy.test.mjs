@@ -14,6 +14,15 @@ const UPDATE = path.join(ROOT, 'deploy', 'update.sh');
 const INSTALL = path.join(ROOT, 'deploy', 'install.sh');
 const run = promisify(execFile);
 
+// update.sh is for hp-laptop: it needs util-linux `flock` and GNU `timeout`,
+// which e.g. macOS lacks. Skip its tests there rather than fail them.
+const hasCommand = (cmd) => {
+  try { execFileSync('sh', ['-c', `command -v ${cmd}`], { stdio: 'ignore' }); return true; } catch { return false; }
+};
+const missing = ['flock', 'timeout'].filter((cmd) => !hasCommand(cmd));
+const updaterTest = (name, fn) =>
+  test(name, { skip: process.platform !== 'linux' ? 'update.sh targets Linux' : missing.length ? `needs ${missing.join(', ')}` : false }, fn);
+
 // Git without the user's config, so helpers, hooks and signing can't interfere.
 const GIT_ENV = {
   GIT_CONFIG_GLOBAL: '/dev/null',
@@ -102,7 +111,7 @@ function snapshot(work) {
   };
 }
 
-test('origin/main ahead: fast-forwards and restarts the service exactly once', async (t) => {
+updaterTest('origin/main ahead: fast-forwards and restarts the service exactly once', async (t) => {
   const f = fixture(t);
   const old = f.head(), target = f.advanceOrigin();
   const r = await f.update();
@@ -114,7 +123,7 @@ test('origin/main ahead: fast-forwards and restarts the service exactly once', a
   assert.equal(fs.existsSync(`${f.lock}.restart-pending`), false);
 });
 
-test('already at origin/main: exits 0 without calling systemctl', async (t) => {
+updaterTest('already at origin/main: exits 0 without calling systemctl', async (t) => {
   const f = fixture(t);
   const before = f.head();
   const r = await f.update();
@@ -124,7 +133,7 @@ test('already at origin/main: exits 0 without calling systemctl', async (t) => {
   assert.match(r.stdout, /nothing to do/);
 });
 
-test('service name and systemctl command can be overridden', async (t) => {
+updaterTest('service name and systemctl command can be overridden', async (t) => {
   const f = fixture(t);
   f.advanceOrigin();
   const r = await f.update({ AQD_UPDATE_SERVICE: 'other.service', AQD_UPDATE_SYSTEMCTL: path.join(f.bin, 'systemctl'), PATH: process.env.PATH });
@@ -153,7 +162,7 @@ const refusals = [
 ];
 
 for (const [name, setup, message] of refusals) {
-  test(`refuses with ${name}: non-zero exit, checkout untouched, no restart`, async (t) => {
+  updaterTest(`refuses with ${name}: non-zero exit, checkout untouched, no restart`, async (t) => {
     const f = fixture(t);
     f.advanceOrigin();
     setup(f);
@@ -183,7 +192,7 @@ const midFetch = [
 ];
 
 for (const [name, change, check, message] of midFetch) {
-  test(`refuses when someone ${name} during the fetch`, async (t) => {
+  updaterTest(`refuses when someone ${name} during the fetch`, async (t) => {
     const f = fixture(t);
     const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
     fs.writeFileSync(path.join(f.bin, 'git'), [
@@ -203,7 +212,7 @@ for (const [name, change, check, message] of midFetch) {
   });
 }
 
-test('ignored files do not block an update and survive it', async (t) => {
+updaterTest('ignored files do not block an update and survive it', async (t) => {
   const f = fixture(t);
   const cache = path.join(f.work, '.cache', 'last-good.json');
   fs.mkdirSync(path.dirname(cache));
@@ -216,7 +225,7 @@ test('ignored files do not block an update and survive it', async (t) => {
   assert.equal(f.calls().length, 1);
 });
 
-test('unreachable remote: non-zero exit, no restart', async (t) => {
+updaterTest('unreachable remote: non-zero exit, no restart', async (t) => {
   const f = fixture(t);
   git(f.work, 'remote', 'set-url', 'origin', path.join(f.dir, 'missing.git'));
   const before = f.head();
@@ -227,7 +236,7 @@ test('unreachable remote: non-zero exit, no restart', async (t) => {
   assert.deepEqual(f.calls(), []);
 });
 
-test('a remote asking for credentials fails fast instead of prompting', async (t) => {
+updaterTest('a remote asking for credentials fails fast instead of prompting', async (t) => {
   const f = fixture(t);
   const server = http.createServer((req, res) => {
     res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="x"' }).end();
@@ -247,7 +256,7 @@ test('a remote asking for credentials fails fast instead of prompting', async (t
   assert.deepEqual(f.calls(), []);
 });
 
-test('a remote that never answers is cut off by the fetch timeout', async (t) => {
+updaterTest('a remote that never answers is cut off by the fetch timeout', async (t) => {
   const f = fixture(t);
   const sockets = new Set();
   const server = net.createServer((s) => sockets.add(s)); // accepts, never replies
@@ -262,7 +271,7 @@ test('a remote that never answers is cut off by the fetch timeout', async (t) =>
   assert.deepEqual(f.calls(), []);
 });
 
-test('a run that finds the lock held exits without acting', async (t) => {
+updaterTest('a run that finds the lock held exits without acting', async (t) => {
   const f = fixture(t);
   const before = f.head();
   f.advanceOrigin();
@@ -279,7 +288,7 @@ test('a run that finds the lock held exits without acting', async (t) => {
   assert.deepEqual(f.calls(), []);
 });
 
-test('a failed restart is retried by the next run', async (t) => {
+updaterTest('a failed restart is retried by the next run', async (t) => {
   const f = fixture(t);
   const target = f.advanceOrigin();
   fs.writeFileSync(f.failFlag, '');
