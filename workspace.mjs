@@ -187,6 +187,32 @@ async function serviceStatus(run) {
   return SERVICES.map((s) => services.find((v) => v.unit === s.unit));
 }
 
+// Read-only view of deploy/'s updater units. Never starts, restarts or enables them.
+async function autoUpdateStatus(run) {
+  const raw = await run('systemctl', ['--user', 'show', 'ai-quota-dashboard-update.service', 'ai-quota-dashboard-update.timer',
+    '--property=Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime', '--no-pager']);
+  const units = unitProperties(raw);
+  const service = units.get('ai-quota-dashboard-update.service'), timer = units.get('ai-quota-dashboard-update.timer');
+  const unknown = { state: 'unknown', timerActive: null, lastRunAt: null, lastExitStatus: null, nextRunAt: null };
+  if (!service || !timer) return unknown;
+  if (service.LoadState === 'not-found') return { ...unknown, state: 'not-installed' };
+  if (service.LoadState !== 'loaded' || !['loaded', 'not-found'].includes(timer.LoadState)) return unknown;
+  const finishedAt = systemdTime(service.ExecMainExitTimestamp);
+  const exitStatus = finishedAt ? number(service.ExecMainStatus) : null;
+  const state = ['active', 'activating', 'deactivating', 'reloading'].includes(service.ActiveState) ? 'running'
+    : service.ActiveState === 'failed' || (service.Result && service.Result !== 'success') ? 'failed'
+    : !finishedAt ? 'never-run' : exitStatus !== 0 ? 'failed' : 'ok';
+  return {
+    state,
+    // A missing timer means nothing schedules the updater, the same as a stopped one.
+    timerActive: timer.LoadState === 'loaded' ? timer.ActiveState === 'active' : false,
+    // The last completed run; a first run still in progress reports when the timer started it.
+    lastRunAt: finishedAt ?? (state === 'running' ? systemdTime(timer.LastTriggerUSec) : null),
+    lastExitStatus: exitStatus,
+    nextRunAt: systemdTime(timer.NextElapseUSecRealtime),
+  };
+}
+
 export function createWorkspaceMonitor({
   sysRoot = '/sys', procRoot = '/proc', run = command, probe = probeInternet,
   now = Date.now, platform = process.platform, fetchImpl = fetch, historyFile = null, workflowHome, repoRoot, t3Worktrees,
@@ -200,15 +226,15 @@ export function createWorkspaceMonitor({
     if (cache && now() - cache.generatedAt < (force ? 5000 : 15_000)) return cache;
     inflight ??= (async () => {
       if (platform !== 'linux') return { generatedAt: now(), supported: false };
-      const [power, sensors, memory, internet, services, model, uptime, diagnostic, workflow] = await Promise.all([
+      const [power, sensors, memory, internet, services, autoUpdate, model, uptime, diagnostic, workflow] = await Promise.all([
         powerStatus(sysRoot), temperatures(sysRoot), memoryStatus(procRoot), internetStatus(run, probe, sysRoot),
-        serviceStatus(run), text(path.join(sysRoot, 'class/dmi/id/product_name')), text(path.join(procRoot, 'uptime')), diagnostics(), agentWorkflow(),
+        serviceStatus(run), autoUpdateStatus(run), text(path.join(sysRoot, 'class/dmi/id/product_name')), text(path.join(procRoot, 'uptime')), diagnostics(), agentWorkflow(),
       ]);
       diagnostic.agentWorkflow = workflow;
       const snapshot = {
         generatedAt: now(), supported: true, model: model || 'Linux computer',
         uptimeSec: number(uptime?.split(/\s+/)[0]) ?? os.uptime(),
-        power, temperatures: sensors, memory, internet, services, diagnostics: diagnostic,
+        power, temperatures: sensors, memory, internet, services, autoUpdate, diagnostics: diagnostic,
       };
       snapshot.history = await recordHistory(snapshot);
       snapshot.diagnostics.backup.lastSuccessAt = snapshot.history.lastSuccessAt;

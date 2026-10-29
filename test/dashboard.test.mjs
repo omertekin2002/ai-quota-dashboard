@@ -412,3 +412,45 @@ test('the version line escapes anything that is not a SHA and links only real SH
   assert.ok(html.includes('&quot;&gt;&lt;script&gt;bad()&lt;/script&gt;'));
   assert.equal(html.match(/<a /g).length, 1); // only the real SHA, abc1234, is a link
 });
+
+test('the Workspace panel shows the auto-update row in every state, with text warnings for failures and a stopped timer', async () => {
+  const now = Date.now();
+  const workspace = { generatedAt: now, supported: true, model: 'HP laptop', uptimeSec: 100, power: { acOnline: true, batteries: [] }, temperatures: [], memory: null,
+    internet: { state: 'online', latencyMs: 5 }, services: [],
+    autoUpdate: { state: 'ok', timerActive: true, lastRunAt: now - 60_000, lastExitStatus: 0, nextRunAt: now + 600_000 } };
+  const { context, element, run } = await loadDashboard({ workspace });
+  const row = (autoUpdate) => {
+    context.autoUpdateFixture = autoUpdate;
+    run('workspace.autoUpdate = autoUpdateFixture; renderWorkspace();');
+    const html = element('workspace-content').innerHTML;
+    return html.slice(html.indexOf('<p class="auto-update">'));
+  };
+  const clock = (ms) => run(`fmtClock(${ms})`);
+  const base = workspace.autoUpdate;
+
+  const ok = row(base);
+  assert.ok(ok.includes(`Auto-update: last run ${clock(base.lastRunAt)} <span class="healthy">✓</span> · next ${clock(base.nextRunAt)}`), ok);
+  assert.ok(!ok.includes('⚠') && !ok.includes('journalctl'));
+
+  const failed = row({ ...base, state: 'failed', lastExitStatus: 1 });
+  for (const text of ['⚠', 'failed', 'exit 1', '<code>journalctl --user -u ai-quota-dashboard-update</code>', `next ${clock(base.nextRunAt)}`]) assert.ok(failed.includes(text), text);
+  assert.ok(failed.includes('class="warning"'));
+
+  const stopped = row({ ...base, timerActive: false, nextRunAt: null });
+  assert.ok(stopped.includes('⚠ timer stopped'), stopped);
+  assert.ok(!stopped.includes('next '));
+
+  assert.ok(row({ ...base, state: 'running' }).includes(`running now · last run ${clock(base.lastRunAt)}`));
+  assert.ok(row({ ...base, state: 'never-run', lastRunAt: null, lastExitStatus: null }).includes('no completed run recorded'));
+  const missing = row({ state: 'not-installed', timerActive: null, lastRunAt: null, lastExitStatus: null, nextRunAt: null });
+  assert.ok(missing.includes('Auto-update: not installed') && !missing.includes('⚠') && !missing.includes('warning'), missing);
+  const unknown = row({ state: 'unknown', timerActive: null, lastRunAt: null, lastExitStatus: null, nextRunAt: null });
+  assert.ok(unknown.includes('Auto-update: status unavailable') && !unknown.includes('⚠'), unknown);
+  // Anything unexpected from the server is escaped, never rendered as markup.
+  const odd = row({ state: '<img src=x>', timerActive: true, lastExitStatus: '<b>', nextRunAt: null });
+  assert.ok(!odd.includes('<img') && odd.includes('status unavailable'), odd);
+  assert.ok(!row({ ...base, state: 'failed', lastExitStatus: '<img src=x>' }).includes('<img'));
+  // A server from before this row existed shows no row at all.
+  run('delete workspace.autoUpdate; renderWorkspace();');
+  assert.ok(!element('workspace-content').innerHTML.includes('Auto-update'));
+});

@@ -152,3 +152,53 @@ test('non-Linux hosts keep the quota dashboard usable without executing Linux co
   const result = await createWorkspaceMonitor({ platform: 'darwin', run: () => { throw new Error('must not run'); } })();
   assert.equal(result.supported, false);
 });
+
+// `systemctl --user show` for deploy/'s updater, as systemd prints it; `service`/`timer` override single properties.
+function updateUnits({ service = {}, timer = {} } = {}) {
+  const block = (fields) => Object.entries(fields).map(([k, v]) => `${k}=${v}`).join('\n');
+  return `${block({ Id: 'ai-quota-dashboard-update.service', LoadState: 'loaded', ActiveState: 'inactive', Result: 'success',
+    ExecMainExitTimestamp: 'Thu 2026-10-29 19:45:49 +03', ExecMainStatus: '0', ...service })}\n\n${block({
+    Id: 'ai-quota-dashboard-update.timer', LoadState: 'loaded', ActiveState: 'active', NextElapseUSecRealtime: 'Thu 2026-10-29 20:00:48 +03',
+    LastTriggerUSec: 'Thu 2026-10-29 19:45:48 +03', Result: 'success', ...timer })}\n`;
+}
+
+test('reads the auto-update timer read-only, with one systemctl show call', async (t) => {
+  const options = await fixture(t);
+  const calls = [];
+  const read = async (raw) => {
+    calls.length = 0;
+    const result = await createWorkspaceMonitor({ ...options, run: async (file, args) => {
+      calls.push([file, ...args]);
+      return file === 'systemctl' && args.includes('ai-quota-dashboard-update.service') ? raw : null;
+    } })();
+    return result.autoUpdate;
+  };
+  const lastRunAt = Date.parse('2026-10-29T19:45:49+03:00'), nextRunAt = Date.parse('2026-10-29T20:00:48+03:00');
+
+  assert.deepEqual(await read(updateUnits()), { state: 'ok', timerActive: true, lastRunAt, lastExitStatus: 0, nextRunAt });
+  const updaterCalls = calls.filter((c) => c.some((a) => a.includes('ai-quota-dashboard-update')));
+  assert.deepEqual(updaterCalls, [['systemctl', '--user', 'show', 'ai-quota-dashboard-update.service', 'ai-quota-dashboard-update.timer',
+    '--property=Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime', '--no-pager']]);
+  // Nothing here controls a unit, reads the journal, or runs git.
+  assert.ok(!calls.some(([file, ...args]) => file === 'journalctl' || file === 'git'
+    || (file === 'systemctl' && args.some((a) => ['start', 'stop', 'restart', 'enable', 'disable', 'reset-failed'].includes(a)))));
+
+  assert.deepEqual(await read(updateUnits({ service: { ActiveState: 'failed', Result: 'exit-code', ExecMainStatus: '1' } })),
+    { state: 'failed', timerActive: true, lastRunAt, lastExitStatus: 1, nextRunAt });
+  // A unit that reset its failed state still reports a non-zero exit.
+  assert.equal((await read(updateUnits({ service: { ExecMainStatus: '1' } }))).state, 'failed');
+  assert.deepEqual(await read(updateUnits({ service: { ActiveState: 'activating' } })),
+    { state: 'running', timerActive: true, lastRunAt, lastExitStatus: 0, nextRunAt });
+  assert.deepEqual(await read(updateUnits({ service: { ExecMainExitTimestamp: '' }, timer: { LastTriggerUSec: '', NextElapseUSecRealtime: '' } })),
+    { state: 'never-run', timerActive: true, lastRunAt: null, lastExitStatus: null, nextRunAt: null });
+  // The first run since boot is in progress: its start time is the only reading.
+  assert.deepEqual(await read(updateUnits({ service: { ActiveState: 'activating', ExecMainExitTimestamp: '' } })),
+    { state: 'running', timerActive: true, lastRunAt: Date.parse('2026-10-29T19:45:48+03:00'), lastExitStatus: null, nextRunAt });
+  assert.deepEqual(await read(updateUnits({ timer: { ActiveState: 'inactive', NextElapseUSecRealtime: '' } })),
+    { state: 'ok', timerActive: false, lastRunAt, lastExitStatus: 0, nextRunAt: null });
+  const missing = { state: 'not-installed', timerActive: null, lastRunAt: null, lastExitStatus: null, nextRunAt: null };
+  assert.deepEqual(await read(updateUnits({ service: { LoadState: 'not-found', ExecMainExitTimestamp: '' }, timer: { LoadState: 'not-found', NextElapseUSecRealtime: '', LastTriggerUSec: '' } })), missing);
+  const unknown = { state: 'unknown', timerActive: null, lastRunAt: null, lastExitStatus: null, nextRunAt: null };
+  assert.deepEqual(await read(null), unknown);
+  assert.deepEqual(await read(updateUnits({ service: { LoadState: 'masked' } })), unknown);
+});
