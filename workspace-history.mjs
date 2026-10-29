@@ -73,6 +73,20 @@ export function createWorkspaceHistory({ file = null } = {}) {
         }
       }
     }
+    const update = snapshot.autoUpdate;
+    if (update) {
+      // A run in progress or an unreadable state keeps the last settled result, so neither fakes a change.
+      current.autoUpdate = {
+        result: ['ok', 'failed', 'never-run', 'not-installed'].includes(update.state) ? update.state : previous?.autoUpdate?.result,
+        timerActive: update.timerActive ?? previous?.autoUpdate?.timerActive,
+      };
+      const before = previous?.autoUpdate, after = current.autoUpdate;
+      if (before) {
+        if (after.result === 'failed' && before.result !== 'failed') add('auto-update', `Dashboard auto-update failed${update.lastExitStatus != null ? ` (exit ${update.lastExitStatus})` : ''}`, 'warning');
+        else if (after.result === 'ok' && before.result === 'failed') add('auto-update', 'Dashboard auto-update recovered');
+        if (typeof before.timerActive === 'boolean' && after.timerActive !== before.timerActive) add('auto-update-timer', after.timerActive ? 'Dashboard auto-update timer active' : 'Dashboard auto-update timer inactive', after.timerActive ? 'info' : 'warning');
+      }
+    }
     if (!previous) add('monitor', 'Computer monitoring started');
     else {
       if (current.uptimeSec < previous.uptimeSec) add('boot', 'Computer restarted');

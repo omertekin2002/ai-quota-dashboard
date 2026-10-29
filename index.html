@@ -145,6 +145,10 @@
   .health-check.warning, .diagnostic-status.warning { color: var(--warning-ink); }
   .health-check.critical, .diagnostic-status.critical { color: var(--critical-ink); }
   .service-meta { color: var(--ink-muted); font-size: 11px; margin-top: 5px; }
+  .auto-update { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--hairline); font-size: 12px; color: var(--ink-muted); overflow-wrap: anywhere; }
+  .auto-update .healthy { color: var(--healthy); }
+  .auto-update .warning { color: var(--warning-ink); font-weight: 600; }
+  .auto-update code { font-size: 11.5px; background: var(--hairline); padding: 1px 5px; border-radius: 4px; }
   .diagnostics { margin-top: 28px; }
   .diagnostics-heading { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   .diagnostics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
@@ -389,8 +393,27 @@
       const restarts = s.automaticRestarts != null ? `<div class="service-meta">${s.automaticRestarts} auto restarts${s.startedAt ? ` · up ${esc(fmtDur((Date.now() - s.startedAt) / 1000))}` : ''}</div>` : '';
       return `<li><div class="service-name">${esc(s.name)}</div><div class="service-state ${level}"><span class="health-dot" aria-hidden="true"></span>${esc(stateLabels[s.state] || s.state)}${failedCheck && s.state === 'running' ? ' · Check failed' : ''}</div>${checks}${restarts}</li>`;
     }).join('');
-    $('workspace-content').innerHTML = `<div class="machine-metrics">${metrics.join('')}</div><ul class="services" aria-label="Services">${services}</ul>`;
+    $('workspace-content').innerHTML = `<div class="machine-metrics">${metrics.join('')}</div><ul class="services" aria-label="Services">${services}</ul>${renderAutoUpdate(workspace.autoUpdate)}`;
     renderDiagnostics();
+  }
+
+  // deploy/'s update timer: one quiet row when all is well, text warnings when it failed or stopped.
+  function renderAutoUpdate(u) {
+    if (!u) return ''; // a server from before /api/workspace reported it
+    const row = (parts) => `<p class="auto-update">Auto-update: ${parts.filter(Boolean).join(' · ')}</p>`;
+    if (u.state === 'not-installed') return row(['not installed']);
+    if (u.state === 'unknown') return row(['status unavailable']);
+    const last = u.lastRunAt ? `last run ${esc(fmtClock(u.lastRunAt))}` : '';
+    const result = {
+      ok: `${last || 'last run'} <span class="healthy">✓</span>`,
+      failed: `<span class="warning">⚠ ${last || 'last run'} failed${u.lastExitStatus != null ? ` · exit ${esc(u.lastExitStatus)}` : ''}</span>`,
+      running: `running now${last ? ` · ${last}` : ''}`,
+      'never-run': 'no completed run recorded',
+    }[u.state] || 'status unavailable';
+    const timer = u.timerActive === false ? '<span class="warning">⚠ timer stopped, so updates no longer run</span>'
+      : u.nextRunAt ? `next ${esc(fmtClock(u.nextRunAt))}` : '';
+    const hint = u.state === 'failed' ? `see ${md('`journalctl --user -u ai-quota-dashboard-update`')}` : '';
+    return row([result, timer, hint]);
   }
 
   const mib = (bytes) => bytes >= 1024 ** 3 ? gib(bytes) : `${Math.round(bytes / 1024 ** 2)} MiB`;
