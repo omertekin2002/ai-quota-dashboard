@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, chmod } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkspaceMonitor, probeInternet } from '../workspace.mjs';
+import { command, createWorkspaceMonitor, probeInternet } from '../workspace.mjs';
 
 async function fixture(t, files = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'quota-workspace-'));
@@ -201,4 +201,25 @@ test('reads the auto-update timer read-only, with one systemctl show call', asyn
   const unknown = { state: 'unknown', timerActive: null, lastRunAt: null, lastExitStatus: null, nextRunAt: null };
   assert.deepEqual(await read(null), unknown);
   assert.deepEqual(await read(updateUnits({ service: { LoadState: 'masked' } })), unknown);
+});
+
+test('systemctl runs in UTC, so a local zone name such as CET never hides a timestamp', async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'quota-command-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  for (const name of ['systemctl', 'other']) {
+    await writeFile(path.join(dir, name), '#!/bin/sh\nprintf %s "$TZ"\n');
+    await chmod(path.join(dir, name), 0o755);
+  }
+  const saved = process.env.TZ;
+  process.env.TZ = 'CET';
+  t.after(() => { if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved; });
+  assert.equal(await command(path.join(dir, 'systemctl'), []), 'UTC');
+  assert.equal(await command(path.join(dir, 'other'), []), 'CET'); // other commands keep the local zone
+  // What systemctl then prints parses into the same instant.
+  const options = await fixture(t);
+  const raw = updateUnits({ service: { ExecMainExitTimestamp: 'Thu 2026-10-29 16:45:49 UTC' }, timer: { NextElapseUSecRealtime: 'Thu 2026-10-29 17:00:48 UTC' } });
+  const { autoUpdate } = await createWorkspaceMonitor({ ...options, run: async (file, args) => file === 'systemctl' && args.includes('ai-quota-dashboard-update.service') ? raw : null })();
+  assert.equal(autoUpdate.state, 'ok');
+  assert.equal(autoUpdate.lastRunAt, Date.parse('2026-10-29T19:45:49+03:00'));
+  assert.equal(autoUpdate.nextRunAt, Date.parse('2026-10-29T20:00:48+03:00'));
 });

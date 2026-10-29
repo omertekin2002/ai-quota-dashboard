@@ -33,7 +33,8 @@ export async function command(file, args, { timeout = 4000, maxBuffer = 64 * 102
     const { stdout } = await exec(file, args, {
       timeout,
       maxBuffer,
-      env: { ...process.env, LC_ALL: 'C', SYSTEMD_PAGER: 'cat' },
+      // systemctl prints timestamps in the local zone, and systemdTime() can't parse zone names such as CET or EEST.
+      env: { ...process.env, LC_ALL: 'C', SYSTEMD_PAGER: 'cat', ...(path.basename(file) === 'systemctl' ? { TZ: 'UTC' } : {}) },
     });
     return stdout;
   } catch {
