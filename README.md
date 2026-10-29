@@ -55,13 +55,14 @@ On Linux, the **Workspace computer** panel reports the computer running the dash
 - Memory usage (using Linux's available-memory reading), swap usage, and uptime.
 - The connected Wi-Fi network's name (SSID), or the wired connection's name, along with internet reachability and the HTTPS check's response time. Either Google's or Cloudflare's connectivity endpoint can confirm access; NetworkManager helps distinguish a disconnected link, limited connectivity, and a sign-in portal when both checks fail.
 - Whether **CLIProxyAPI**, **ngrok-proxy-llm**, **T3 Code**, **Tailscale**, and the **network watchdog** are running, with automatic restart counts and service uptime. HTTP checks separately verify T3's local page and Tailscale route, CLIProxyAPI's `/healthz`, the retry proxy's backend-aware `/health`, and its public ngrok route. They don't send LLM requests or refresh credentials.
+- An **Auto-update** row for the updater in [Keeping hp-laptop up to date](#keeping-hp-laptop-up-to-date), such as "Auto-update: last run 19:45 ✓ · next 20:00". A failed run shows a ⚠ warning with its exit status and the `journalctl --user -u ai-quota-dashboard-update` command that explains it; a stopped timer gets its own ⚠ warning. On a machine without the updater units the row just says "not installed". It comes from one read-only `systemctl --user show` of `ai-quota-dashboard-update.service` and its timer, published as `autoUpdate` in `/api/workspace`.
 
 Below the quota cards, **Computer diagnostics** adds:
 
 - Linux CPU, memory, and I/O pressure (the share of time tasks were stalled over the last 10 seconds), plus the five largest processes by resident memory. The top-memory list shows executable names and PIDs, without arguments or environments. Memory warnings use available RAM and pressure: warning at ≤10% available, ≥10% partial stalls, or ≥1% full stalls; critical at ≤5% available or ≥10% full stalls.
 - Internal SSD and T7 free space, actual T7 mount presence, read-only mount detection, and the last backup result, last known success, and next scheduled run. An autofs placeholder does not count as a mounted T7. A previous successful backup remains recorded if a later run fails; the last-success time is unknown if monitoring starts after a failure with no earlier record.
 - Wi-Fi signal and link rate, active Tailscale peer connection types/counts, and a 30-minute history of HTTPS response times and unsuccessful internet checks. Link rate is not measured internet speed; the Tailscale view shows active connections, not a client-specific speed test.
-- A recent-events timeline for observed service state changes/restarts, failed/recovered HTTP checks, internet/network changes, link-drop and OOM-kill counter increases, memory pressure, storage changes, and backup results. Events are sampled, not a complete historical log; brief changes can fall between readings. Monitoring starts tracking on installation, with the current backup result seeded from systemd.
+- A recent-events timeline for observed service state changes/restarts, failed/recovered HTTP checks, internet/network changes, link-drop and OOM-kill counter increases, memory pressure, storage changes, backup results, and auto-update runs that fail or recover and its timer stopping or starting. An auto-update run in progress or an unreadable reading keeps the previous result, so neither records an event. Events are sampled, not a complete historical log; brief changes can fall between readings. Monitoring starts tracking on installation, with the current backup result seeded from systemd.
 
 ### Agentctl & build-workflow
 
@@ -128,6 +129,8 @@ On hp-laptop, the dashboard runs from `~/ai-quota-dashboard` as the `ai-quota-da
 4. restarts `ai-quota-dashboard.service` only if `HEAD` moved, and logs `old → new` short SHAs. If that restart fails, the next run retries it.
 
 A bad commit on `main` therefore goes live within about 15 minutes of the merge.
+
+The dashboard's Workspace computer panel shows the updater's last run, its result and the next run, and warns in text when a run failed or the timer stopped. Failures and recoveries also appear in Recent events. The dashboard only reads the units' state; it never starts, retries or enables the updater, and doesn't read its journal.
 
 ```sh
 deploy/install.sh                                         # install or update (no sudo, safe to re-run)

@@ -139,3 +139,56 @@ test('latency samples expire, refreshes do not add duplicate samples, and unwrit
   value.generatedAt += 31 * 60_000;
   assert.equal((await record(value)).samples.length, 1);
 });
+
+test('auto-update events mark each failure, recovery and timer change once, and never from an unknown reading', async () => {
+  const record = createWorkspaceHistory();
+  const value = snapshot(20_000_000);
+  const readings = [
+    { state: 'ok', timerActive: true },
+    { state: 'unknown', timerActive: null }, // systemctl unavailable: no change either way
+    { state: 'failed', timerActive: true, lastExitStatus: 1 },
+    { state: 'failed', timerActive: true, lastExitStatus: 1 }, // still failing: no repeat
+    { state: 'running', timerActive: true }, // the retry is in progress: still failed
+    { state: 'unknown', timerActive: null },
+    { state: 'failed', timerActive: true, lastExitStatus: 1 },
+    { state: 'ok', timerActive: true },
+    { state: 'running', timerActive: true },
+    { state: 'ok', timerActive: false },
+    { state: 'unknown', timerActive: null },
+    { state: 'ok', timerActive: false },
+    { state: 'ok', timerActive: true },
+  ];
+  let result;
+  for (const reading of readings) {
+    value.generatedAt += 30_000;
+    value.autoUpdate = { lastRunAt: null, lastExitStatus: 0, nextRunAt: null, ...reading };
+    result = await record(value);
+  }
+  const titles = result.events.filter((e) => e.title.startsWith('Dashboard auto-update')).map((e) => [e.title, e.level]).reverse();
+  assert.deepEqual(titles, [
+    ['Dashboard auto-update failed (exit 1)', 'warning'],
+    ['Dashboard auto-update recovered', 'info'],
+    ['Dashboard auto-update timer inactive', 'warning'],
+    ['Dashboard auto-update timer active', 'info'],
+  ]);
+});
+
+test('a failure seen while the first auto-update reading was running is still recorded, but a first reading is not', async () => {
+  const record = createWorkspaceHistory();
+  const value = snapshot(30_000_000);
+  value.autoUpdate = { state: 'failed', timerActive: true, lastExitStatus: 2 };
+  assert.ok(!(await record(value)).events.some((e) => e.title.startsWith('Dashboard auto-update')));
+  const fresh = createWorkspaceHistory();
+  value.autoUpdate = { state: 'running', timerActive: true, lastExitStatus: null };
+  await fresh(value);
+  value.generatedAt += 30_000;
+  value.autoUpdate = { state: 'failed', timerActive: true, lastExitStatus: 2 };
+  assert.ok((await fresh(value)).events.some((e) => e.title === 'Dashboard auto-update failed (exit 2)'));
+  // History from a dashboard that predates the field adds nothing on its first new reading.
+  const old = createWorkspaceHistory();
+  delete value.autoUpdate;
+  await old(value);
+  value.generatedAt += 30_000;
+  value.autoUpdate = { state: 'failed', timerActive: false, lastExitStatus: 2 };
+  assert.ok(!(await old(value)).events.some((e) => e.title.startsWith('Dashboard auto-update')));
+});
