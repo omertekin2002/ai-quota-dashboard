@@ -108,6 +108,14 @@
     background: var(--ink-1); box-shadow: 0 0 0 2px var(--surface); }
   .win-foot { margin-top: 8px; font-size: 12.5px; color: var(--ink-muted); min-height: 17px; }
   .win-foot.warn { color: var(--warning-ink); }
+  .win { cursor: pointer; }
+  .win-bottom { display: flex; align-items: baseline; gap: 12px; margin-top: 8px; }
+  .win-bottom .win-foot { margin-top: 0; flex: 1; min-width: 0; }
+  .win-more { margin-left: auto; font-size: 12px; color: var(--ink-muted); white-space: nowrap; }
+  .win[aria-expanded="true"] .win-more { color: var(--ink-2); }
+  .win-details { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--hairline); border-radius: 8px;
+    background: var(--page); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+  .win-details .k { color: var(--ink-muted); }
 
   table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
   th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--hairline); font-size: 13px; }
@@ -292,7 +300,10 @@
   const $ = (id) => document.getElementById(id);
   let data = null;
   let tableView = false;
+  const openWindows = new Set(); // windowKey()s whose details are expanded, kept across re-renders
   let loading = false;
+  let quotaError = false; // the last /api/quotas load failed, so readings on screen aren't live
+  let quotaTimeouts = 0; // /api/quotas timeouts in a row since the last successful load
   let reloadTimer = null;
   let version = null; // which commit the server runs, from /api/version
   let workspace = null;
@@ -796,13 +807,19 @@
     return rows.map(([k, val]) => `<div><span class="k">${esc(k)}:</span> ${esc(val)}</div>`).join('');
   }
 
+  // Identifies a window across reloads, so reordered accounts keep their own expanded details.
+  const windowKey = (a, w) => JSON.stringify([String(a.id ?? ''), String(w.id ?? w.label ?? '')]);
+
   function renderWindow(a, w, now, ai, wi) {
     const v = view(w, now);
     const st = statusLabel(v);
     const foot = footText(v, a.stale);
     const aria = `${w.label}: ${v.unknown ? 'usage unknown' : `${Math.round(v.left)} percent left`}, ${resetText(w, v)}`;
+    const key = windowKey(a, w);
+    const open = openWindows.has(key);
+    const details = `win-${ai}-${wi}-details`;
     return `
-      <div class="win" tabindex="0" data-a="${ai}" data-w="${wi}" aria-label="${esc(aria)}">
+      <div class="win" role="button" tabindex="0" aria-expanded="${open}" aria-controls="${details}"${open ? ` aria-describedby="${details}"` : ''} data-a="${ai}" data-w="${wi}" data-key="${esc(key)}" aria-label="${esc(aria)}">
         <div class="win-top"><span class="win-label">${esc(w.label)}</span><span class="win-reset">${esc(resetText(w, v))}</span></div>
         <div class="win-main">
           <span class="big">${pctText(v.left)}</span><span class="big-unit">left</span>
@@ -812,9 +829,16 @@
           ${v.unknown ? '' : `<div class="fill" style="width:${v.left}%"></div>`}
           ${v.timeLeftPct != null ? `<div class="pace" style="left:${v.timeLeftPct}%"></div>` : ''}
         </div>
-        <div class="win-foot ${foot.warn ? 'warn' : ''}">${esc(foot.text)}</div>
+        <div class="win-bottom">
+          <div class="win-foot ${foot.warn ? 'warn' : ''}">${esc(foot.text)}</div>
+          <span class="win-more" aria-hidden="true">${open ? '▾' : '▸'} Details</span>
+        </div>
+        <div class="win-details" id="${details}"${open ? '' : ' hidden'}>${open ? tipHtml(a, w, v) : ''}</div>
       </div>`;
   }
+
+  // When an account's numbers were read: its own fetch time, else the payload's.
+  const readingAt = (a) => a.fetchedAt ?? data.generatedAt;
 
   function renderCard(a, now, ai) {
     const mono = a.provider === 'claude' ? '✳' : '◎';
@@ -822,7 +846,9 @@
     const via = `Read from ${a.sources?.join(' + ') || 'n/a'}`;
     const fresh = a.stale
       ? `<span class="fresh stale" title="${esc(`${a.error} ${via}`)}">◷ ${esc(ago(a.fetchedAt))}</span>`
-      : a.error ? '' : `<span class="fresh" title="${esc(via)}">● Live</span>`;
+      : a.error ? ''
+      : quotaError ? `<span class="fresh stale" title="${esc(`Couldn't refresh. ${via}`)}">◷ ${esc(ago(readingAt(a)))}</span>`
+      : `<span class="fresh" title="${esc(via)}">● Live</span>`;
     const body = a.windows?.length
       ? a.windows.map((w, wi) => renderWindow(a, w, now, ai, wi)).join('')
       : '';
@@ -852,7 +878,7 @@
           <td class="num">${pctText(v.left)}</td>
           <td class="num">${pctText(v.used)}</td>
           <td>${esc(resetText(w, v) || '–')}</td>
-          <td>${st ? esc(st.text) : v.unknown ? 'Usage unknown' : 'OK'}${a.stale ? ` (reading from ${esc(ago(a.fetchedAt))})` : ''}</td>
+          <td>${st ? esc(st.text) : v.unknown ? 'Usage unknown' : 'OK'}${a.stale || (quotaError && !a.error) ? ` (reading from ${esc(ago(readingAt(a)))})` : ''}</td>
         </tr>`;
       }),
     );
@@ -878,15 +904,26 @@
   function render() {
     if (!data) return;
     const now = Date.now();
-    $('meta').innerHTML = `Claude &amp; ChatGPT · updated ${esc(ago(data.generatedAt))}${versionHtml(version)}`;
+    const live = new Set(data.accounts.flatMap((a) => (a.windows || []).map((w) => windowKey(a, w))));
+    for (const key of openWindows) if (!live.has(key)) openWindows.delete(key);
+    const failed = quotaError ? ` · <span class="version-warn">⚠ Couldn't refresh</span>` : '';
+    $('meta').innerHTML = `Claude &amp; ChatGPT · updated ${esc(ago(data.generatedAt))}${failed}${versionHtml(version)}`;
     if (!data.accounts.length) {
       $('content').innerHTML = `<div class="empty">No Claude or ChatGPT logins found. Sign in with <code>claude</code> or <code>codex</code>, or add accounts to CLIProxyAPI (<code>~/.cli-proxy-api</code>).</div>`;
       $('legend').hidden = true;
+      hideTip();
       return;
     }
+    // Replacing the cards would drop keyboard focus, so put it back on the same window afterwards.
+    const active = document.activeElement;
+    const focusKey = active?.matches?.('.win') ? active.dataset.key : null;
     $('content').innerHTML = tableView
       ? renderTable(now)
       : `<div class="grid">${data.accounts.map((a, ai) => renderCard(a, now, ai)).join('')}</div>`;
+    hideTip(); // it describes a card that no longer exists
+    if (focusKey != null && !tableView) {
+      [...$('content').querySelectorAll('.win')].find((el) => el.dataset.key === focusKey)?.focus({ preventScroll: true });
+    }
     $('legend').hidden = tableView;
 
     // Tab title: the tightest known window per account, e.g. "25% · 95%". Unknown windows are skipped.
@@ -901,18 +938,35 @@
     if (passed && !reloadTimer) reloadTimer = setTimeout(() => { reloadTimer = null; load(true); }, 20_000);
   }
 
+  // Every request is bounded, so a stalled server can't keep `loading` (and Refresh) stuck.
+  // The server reads accounts one after another, and each can take a 15 s profile lookup plus a 15 s usage request,
+  // so the quota timeout allows 30 s per account in the last reading (plus 15 s of slack), and never less than 60 s.
+  // Each timeout in a row doubles it (up to 10 min), so a collection bigger than the page knows about still gets through.
+  const quotaTimeoutMs = () => Math.min(600_000, Math.max(60_000, 15_000 + 30_000 * (data?.accounts?.length ?? 0)) * 2 ** quotaTimeouts);
+  const VERSION_TIMEOUT_MS = 10_000;
+
   async function load(force = false) {
     if (loading) return;
     loading = true;
     // Optional: an older server has no /api/version, and a failed read keeps the last one.
-    const versionReq = fetch('/api/version', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const versionReq = fetch('/api/version', { cache: 'no-store', signal: AbortSignal.timeout(VERSION_TIMEOUT_MS) })
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const timeoutMs = quotaTimeoutMs();
     try {
-      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store' });
+      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
+      quotaError = false;
+      quotaTimeouts = 0;
       $('banner').innerHTML = '';
     } catch (err) {
-      $('banner').innerHTML = `<div class="banner">Can't reach the quota server (${esc(err.message)}). Is <code>node server.mjs</code> running?</div>`;
+      quotaError = true;
+      const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+      if (timedOut) quotaTimeouts++;
+      const why = timedOut
+        ? `The quota server didn't answer within ${timeoutMs / 1000} s`
+        : `Can't reach the quota server (${esc(err?.message)})`;
+      $('banner').innerHTML = `<div class="banner">${why}. ${data ? 'Showing the last reading. ' : ''}Is <code>node server.mjs</code> running?</div>`;
     } finally {
       version = (await versionReq) || version;
       loading = false;
@@ -920,8 +974,33 @@
     }
   }
 
-  // Hover / focus tooltip with exact numbers.
+  // Each window's details: an inline disclosure toggled by click or tap, Enter or Space, and closed by Escape.
+  function setWindowOpen(el, open) {
+    if (open) openWindows.add(el.dataset.key); else openWindows.delete(el.dataset.key);
+    render(); // keeps focus on the window if it had it
+  }
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest?.('.win');
+    if (!el) return;
+    if (typeof getSelection === 'function' && String(getSelection())) return; // the user was selecting text to copy
+    setWindowOpen(el, !openWindows.has(el.dataset.key));
+  });
+  document.addEventListener('keydown', (e) => {
+    const el = e.target.closest?.('.win');
+    if (el !== e.target || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault(); // Space would scroll the page
+      if (!e.repeat) setWindowOpen(el, !openWindows.has(el.dataset.key));
+    } else if (e.key === 'Escape' && openWindows.has(el.dataset.key)) {
+      e.preventDefault();
+      setWindowOpen(el, false);
+    }
+  });
+
+  // Hover preview with the same numbers, only for a mouse or trackpad: touch and keyboard use the details instead.
   const tip = $('tip');
+  const canHover = () => typeof matchMedia === 'function' && matchMedia('(hover: hover) and (pointer: fine)').matches;
+  function hideTip() { $('tip').style.display = 'none'; }
   function showTip(el, x, y) {
     const a = data.accounts[+el.dataset.a], w = a.windows[+el.dataset.w];
     tip.innerHTML = tipHtml(a, w, view(w, Date.now()));
@@ -932,15 +1011,10 @@
   }
   document.addEventListener('pointermove', (e) => {
     const el = e.target.closest?.('.win');
-    if (el) showTip(el, e.clientX, e.clientY); else tip.style.display = 'none';
+    // An expanded window already shows the same rows inline.
+    if (el && e.pointerType !== 'touch' && canHover() && !openWindows.has(el.dataset.key)) showTip(el, e.clientX, e.clientY);
+    else hideTip();
   });
-  document.addEventListener('focusin', (e) => {
-    const el = e.target.closest?.('.win');
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    showTip(el, r.left + 20, r.bottom - 10);
-  });
-  document.addEventListener('focusout', () => (tip.style.display = 'none'));
 
   $('refresh').onclick = () => refreshAll(true);
   $('view').onclick = () => {

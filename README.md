@@ -19,7 +19,9 @@ For each account and limit window, including model-specific ones such as Claude'
 - a pace projection: how much will be left at the reset if you keep the current rate
 - a tick on the meter marking how much of the window's time is left. If the bar ends left of the tick, you're using the quota faster than it refills.
 
-Hover a window for exact numbers. The **Table** button shows everything as a table. The page updates every 2 minutes, and the tab title shows the tightest window per account.
+Tap or click a window, or focus it and press Enter or Space, to show its exact numbers inline (left and used %, window length, share of the weekly limit, reset time, time left and reading age). Do the same again, or press Escape, to hide them. Each window opens on its own, and stays open through automatic and manual refreshes and the **Table** view, even when accounts change order. With a mouse or trackpad, hovering a window also previews the same numbers in a tooltip. The **Table** button shows everything as a table. The page updates every 2 minutes, and the tab title shows the tightest window per account.
+
+Every request the page makes has a timeout: for quotas, 30 seconds per account in the last reading plus 15 seconds, and at least 60 seconds. The server reads accounts one after another, and each can take a 15-second profile lookup plus a 15-second usage request, so this covers a slow but healthy collection. Each timeout in a row doubles the next one, up to 10 minutes, so a collection bigger than the page expects still gets through. The other timeouts are 10 seconds for the version, 12 seconds for the computer panel and 100 seconds for the pipeline. A stalled server can't leave **Refresh** stuck: after a timeout the banner says so, the last cards stay on screen and the next refresh tries again. While the last quota load has failed, no card claims **● Live**. Each shows its reading's age (◷) instead, and the line under **Quotas** says ⚠ Couldn't refresh until a load succeeds.
 
 The line under **Quotas** also shows which commit the server is running, linked on GitHub. It adds a text warning when that isn't the latest code:
 
