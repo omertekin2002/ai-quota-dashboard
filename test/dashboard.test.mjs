@@ -8,7 +8,9 @@ const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
 
 // Run index.html's script in a vm with stub DOM elements and canned API replies.
 // Pass `now` to pin Date (and Date.now) inside the page, so durations and percentages are deterministic.
-async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false } = {}) {
+// `respond(url, init)` may return a reply (or a promise of one) to override the canned reply for that request.
+// `AbortSignal.timeout(ms)` never fires on its own: `expire(ms)` aborts the pending signals made with that delay.
+async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond } = {}) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
@@ -21,6 +23,12 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   }
   const listeners = {};
   const timeouts = [];
+  const signals = []; // { ms, controller } for each AbortSignal.timeout the page asked for
+  const expire = (ms) => {
+    for (const s of signals) {
+      if (s.ms === ms && !s.controller.signal.aborted) s.controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+    }
+  };
   const document = {
     getElementById: element, visibilityState: 'visible', title: '',
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
@@ -28,10 +36,11 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   const globals = {
     document,
     // `version: null` answers /api/version with a 404, like a server from before it existed.
-    fetch: async (url) => (url.startsWith('/api/version')
+    fetch: async (url, init) => respond?.(url, init) ?? (url.startsWith('/api/version')
       ? { ok: version != null, status: version != null ? 200 : 404, json: async () => version }
       : { ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? workspace : pipeline) }),
-    AbortSignal, setInterval() {}, innerWidth: 1280, innerHeight: 800,
+    AbortSignal: { timeout: (ms) => { const controller = new AbortController(); signals.push({ ms, controller }); return controller.signal; } },
+    setInterval() {}, innerWidth: 1280, innerHeight: 800,
     setTimeout: (fn, ms) => { timeouts.push(ms); return timeouts.length; },
   };
   if (now != null) {
@@ -49,7 +58,7 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
     for (const fn of listeners.pointermove) fn({ target, clientX: 10, clientY: 10 });
     return element('tip').innerHTML;
   };
-  return { context, document, element, timeouts, hover, run: (code) => vm.runInContext(code, context) };
+  return { context, document, element, timeouts, signals, expire, hover, run: (code) => vm.runInContext(code, context) };
 }
 
 test('dashboard renders diagnostics, escapes machine-supplied names, and retains readings on failure', async () => {
@@ -453,4 +462,123 @@ test('the Workspace panel shows the auto-update row in every state, with text wa
   // A server from before this row existed shows no row at all.
   run('delete workspace.autoUpdate; renderWorkspace();');
   assert.ok(!element('workspace-content').innerHTML.includes('Auto-update'));
+});
+
+// A request that only settles when its signal aborts, like a server that accepted the connection and then stalled.
+const hang = (init) => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
+const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(setImmediate); };
+
+test('every page request is bounded: quotas 60 s, version 10 s, workspace and pipeline unchanged', async () => {
+  const requests = [];
+  const { signals } = await loadDashboard({ respond: (url, init) => { requests.push([url.split('?')[0], init?.signal]); } });
+  const bounds = requests.map(([url, signal]) => [url, signals.find((s) => s.controller.signal === signal)?.ms]);
+  assert.deepEqual(Object.fromEntries(bounds), { '/api/version': 10_000, '/api/quotas': 60_000, '/api/workspace': 12_000, '/api/pipeline': 100_000 });
+  assert.equal(bounds.length, 4);
+});
+
+test('a hung quota request times out, keeps the last cards, stops claiming Live, and releases Refresh', async () => {
+  const live = account('claude:a', [win('5-hour', 30, 9000)], { fetchedAt: NOW - 300_000 });
+  const stale = account('openai:b', [win('5-hour', 50, 9000)], {
+    provider: 'openai', name: 'ChatGPT', stale: true, fetchedAt: NOW - 3_600_000, error: 'Token expired. Run `codex` to sign in again.',
+  });
+  let mode = 'ok';
+  let quotaRequests = 0;
+  const page = await loadDashboard({
+    quotas: quotasOf(live, stale), now: NOW,
+    version: { commit: 'abc1234', diskCommit: 'abc1234', upstreamCommit: 'abc1234', restartNeeded: false, behindUpstream: false },
+    respond: (url, init) => {
+      if (!url.startsWith('/api/quotas')) return undefined;
+      quotaRequests++;
+      if (mode === 'hang') return hang(init);
+      if (mode === 'http500') return { ok: false, status: 500, json: async () => ({ error: 'internal error' }) };
+      return undefined;
+    },
+  });
+  const { element, run, expire } = page;
+  const cards = () => cardsOf(element('content').innerHTML);
+  const staleBefore = cards()[1];
+  assert.ok(cards()[0].includes('● Live'), cards()[0]);
+  assert.ok(!element('meta').innerHTML.includes('refresh'), element('meta').innerHTML);
+  assert.equal(quotaRequests, 1);
+
+  mode = 'hang';
+  const clicked = element('refresh').onclick();
+  await settle();
+  assert.equal(element('refresh').disabled, true);
+  assert.equal(run('loading'), true);
+  assert.equal(quotaRequests, 2);
+  run('load(true)'); // ignored while the hung request is in flight
+  assert.equal(quotaRequests, 2);
+
+  expire(60_000);
+  await clicked;
+  assert.equal(element('refresh').disabled, false);
+  assert.equal(run('loading'), false);
+  const banner = element('banner').innerHTML;
+  assert.ok(banner.includes("The quota server didn't answer within 60 s. Showing the last reading."), banner);
+  for (const raw of ['TimeoutError', 'AbortError', 'aborted', 'timed out']) assert.ok(!banner.includes(raw), `${raw} in ${banner}`);
+  const [liveCard, staleCard] = cards();
+  assert.ok(liveCard.includes('<span class="big">70%</span>'), liveCard);
+  assert.ok(!element('content').innerHTML.includes('● Live'), liveCard);
+  assert.ok(liveCard.includes('<span class="fresh stale" title="Couldn&#39;t refresh. Read from Claude Code">◷ 5m ago</span>'), liveCard);
+  assert.equal(staleCard, staleBefore);
+  assert.ok(element('meta').innerHTML.includes(`<span class="version-warn">⚠ Couldn't refresh</span>`), element('meta').innerHTML);
+  assert.ok(element('meta').innerHTML.includes('running <a '), element('meta').innerHTML);
+  run('tableView = true; render();');
+  assert.ok(tableRowsOf(element('content').innerHTML)[0].includes(' (reading from 5m ago)</td>'), element('content').innerHTML);
+  run('tableView = false; render();');
+
+  // Any other failure is still reported with its reason, and still isn't Live.
+  mode = 'http500';
+  await run('load(true)');
+  assert.equal(quotaRequests, 3);
+  assert.ok(element('banner').innerHTML.includes("Can't reach the quota server (HTTP 500)"), element('banner').innerHTML);
+  assert.ok(!element('content').innerHTML.includes('● Live'));
+
+  // The next successful load restores Live and clears the warnings.
+  mode = 'ok';
+  await run('load(true)');
+  assert.equal(quotaRequests, 4);
+  assert.equal(element('banner').innerHTML, '');
+  assert.ok(cards()[0].includes('● Live'), cards()[0]);
+  assert.equal(cards()[1], staleBefore);
+  assert.ok(!element('meta').innerHTML.includes('refresh'), element('meta').innerHTML);
+  assertClean(element('content').innerHTML);
+});
+
+test('a first quota load that times out shows the banner and leaves Refresh usable', async () => {
+  let hung = true;
+  const page = await loadDashboard({ now: NOW, respond: (url, init) => (url.startsWith('/api/quotas') && hung ? hang(init) : undefined) });
+  assert.equal(page.element('refresh').disabled, true);
+  page.expire(60_000);
+  await settle();
+  assert.equal(page.element('refresh').disabled, false);
+  const banner = page.element('banner').innerHTML;
+  assert.ok(banner.includes("The quota server didn't answer within 60 s. Is <code>node server.mjs</code> running?"), banner);
+  hung = false;
+  await page.element('refresh').onclick();
+  assert.equal(page.element('banner').innerHTML, '');
+});
+
+test('a hung version request holds quotas only until its own 10 s timeout, and the last version stays', async () => {
+  let hung = false;
+  const quotas = quotasOf(account('claude:a', [win('5-hour', 30, 9000)]));
+  const page = await loadDashboard({
+    quotas, now: NOW,
+    version: { commit: 'abc1234', diskCommit: 'abc1234', upstreamCommit: 'abc1234', restartNeeded: false, behindUpstream: false },
+    respond: (url, init) => (url.startsWith('/api/version') && hung ? hang(init) : undefined),
+  });
+  assert.ok(page.element('meta').innerHTML.includes('<code>abc1234</code>'));
+  hung = true;
+  quotas.accounts[0].windows[0].usedPct = 80;
+  const reload = page.run('load(true)');
+  await settle();
+  assert.equal(page.run('loading'), true);
+  page.expire(10_000);
+  await reload;
+  assert.equal(page.run('loading'), false);
+  assert.ok(page.element('content').innerHTML.includes('<span class="big">20%</span>'), page.element('content').innerHTML);
+  assert.ok(page.element('content').innerHTML.includes('● Live'));
+  assert.ok(page.element('meta').innerHTML.includes('<code>abc1234</code>'), page.element('meta').innerHTML);
+  assert.equal(page.element('banner').innerHTML, '');
 });

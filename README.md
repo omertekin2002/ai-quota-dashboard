@@ -21,6 +21,8 @@ For each account and limit window, including model-specific ones such as Claude'
 
 Hover a window for exact numbers. The **Table** button shows everything as a table. The page updates every 2 minutes, and the tab title shows the tightest window per account.
 
+Every request the page makes has a timeout: 60 seconds for quotas (longer than a slow but healthy collection, whose provider requests are capped at 15 seconds each), 10 seconds for the version, 12 seconds for the computer panel and 100 seconds for the pipeline. A stalled server can't leave **Refresh** stuck: after a timeout the banner says so, the last cards stay on screen and the next refresh tries again. While the last quota load has failed, no card claims **● Live**. Each shows its reading's age (◷) instead, and the line under **Quotas** says ⚠ Couldn't refresh until a load succeeds.
+
 The line under **Quotas** also shows which commit the server is running, linked on GitHub. It adds a text warning when that isn't the latest code:
 
 - **⚠ Restart needed to run `<sha>`**: the checkout on disk has moved to a newer commit, but the process wasn't restarted. HEAD on disk is re-read at most once a minute.
