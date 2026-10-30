@@ -557,6 +557,41 @@ test('a hung quota request times out, keeps the last cards, stops claiming Live,
   assertClean(element('content').innerHTML);
 });
 
+test('each quota timeout in a row doubles the next budget, up to 10 min, and a success resets it', async () => {
+  // The server's cache lasts 90 s from the start of a collection, so a collection slower than the page's timeout
+  // would be aborted on every poll if the timeout never grew.
+  let hung = true;
+  let quotaSignal = null;
+  const page = await loadDashboard({ now: NOW, respond: (url, init) => {
+    if (!url.startsWith('/api/quotas')) return undefined;
+    quotaSignal = init.signal;
+    return hung ? hang(init) : undefined;
+  } });
+  const quotaBudget = () => page.signals.find((s) => s.controller.signal === quotaSignal).ms;
+  const budgets = [];
+  for (let i = 0; i < 6; i++) {
+    if (i) page.run('load(true)');
+    await settle();
+    budgets.push(quotaBudget());
+    page.expire(quotaBudget());
+    await settle();
+    assert.ok(page.element('banner').innerHTML.includes(`didn't answer within ${quotaBudget() / 1000} s`), page.element('banner').innerHTML);
+  }
+  assert.deepEqual(budgets, [60_000, 120_000, 240_000, 480_000, 600_000, 600_000]);
+  hung = false;
+  await page.run('load(true)');
+  assert.equal(quotaBudget(), 600_000);
+  assert.equal(page.element('banner').innerHTML, '');
+  assert.equal(page.run('quotaTimeoutMs()'), 60_000);
+  // After a success, the next timeout starts doubling from the base again.
+  hung = true;
+  page.run('load(true)');
+  await settle();
+  page.expire(60_000);
+  await settle();
+  assert.equal(page.run('quotaTimeoutMs()'), 120_000);
+});
+
 test('a first quota load that times out shows the banner and leaves Refresh usable', async () => {
   let hung = true;
   const page = await loadDashboard({ now: NOW, respond: (url, init) => (url.startsWith('/api/quotas') && hung ? hang(init) : undefined) });

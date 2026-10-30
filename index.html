@@ -294,6 +294,7 @@
   let tableView = false;
   let loading = false;
   let quotaError = false; // the last /api/quotas load failed, so readings on screen aren't live
+  let quotaTimeouts = 0; // /api/quotas timeouts in a row since the last successful load
   let reloadTimer = null;
   let version = null; // which commit the server runs, from /api/version
   let workspace = null;
@@ -911,7 +912,8 @@
   // Every request is bounded, so a stalled server can't keep `loading` (and Refresh) stuck.
   // The server reads accounts one after another, and each can take a 15 s profile lookup plus a 15 s usage request,
   // so the quota timeout allows 30 s per account in the last reading (plus 15 s of slack), and never less than 60 s.
-  const quotaTimeoutMs = () => Math.max(60_000, 15_000 + 30_000 * (data?.accounts?.length ?? 0));
+  // Each timeout in a row doubles it (up to 10 min), so a collection bigger than the page knows about still gets through.
+  const quotaTimeoutMs = () => Math.min(600_000, Math.max(60_000, 15_000 + 30_000 * (data?.accounts?.length ?? 0)) * 2 ** quotaTimeouts);
   const VERSION_TIMEOUT_MS = 10_000;
 
   async function load(force = false) {
@@ -926,10 +928,13 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
       quotaError = false;
+      quotaTimeouts = 0;
       $('banner').innerHTML = '';
     } catch (err) {
       quotaError = true;
-      const why = err?.name === 'TimeoutError' || err?.name === 'AbortError'
+      const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+      if (timedOut) quotaTimeouts++;
+      const why = timedOut
         ? `The quota server didn't answer within ${timeoutMs / 1000} s`
         : `Can't reach the quota server (${esc(err?.message)})`;
       $('banner').innerHTML = `<div class="banner">${why}. ${data ? 'Showing the last reading. ' : ''}Is <code>node server.mjs</code> running?</div>`;
