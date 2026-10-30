@@ -909,8 +909,9 @@
   }
 
   // Every request is bounded, so a stalled server can't keep `loading` (and Refresh) stuck.
-  // The server caps each provider request at 15 s and looks up profiles before usage, so 60 s covers a slow but healthy collection.
-  const QUOTA_TIMEOUT_MS = 60_000;
+  // The server reads accounts one after another, and each can take a 15 s profile lookup plus a 15 s usage request,
+  // so the quota timeout allows 30 s per account in the last reading (plus 15 s of slack), and never less than 60 s.
+  const quotaTimeoutMs = () => Math.max(60_000, 15_000 + 30_000 * (data?.accounts?.length ?? 0));
   const VERSION_TIMEOUT_MS = 10_000;
 
   async function load(force = false) {
@@ -919,8 +920,9 @@
     // Optional: an older server has no /api/version, and a failed read keeps the last one.
     const versionReq = fetch('/api/version', { cache: 'no-store', signal: AbortSignal.timeout(VERSION_TIMEOUT_MS) })
       .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const timeoutMs = quotaTimeoutMs();
     try {
-      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(QUOTA_TIMEOUT_MS) });
+      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
       quotaError = false;
@@ -928,7 +930,7 @@
     } catch (err) {
       quotaError = true;
       const why = err?.name === 'TimeoutError' || err?.name === 'AbortError'
-        ? `The quota server didn't answer within ${QUOTA_TIMEOUT_MS / 1000} s`
+        ? `The quota server didn't answer within ${timeoutMs / 1000} s`
         : `Can't reach the quota server (${esc(err?.message)})`;
       $('banner').innerHTML = `<div class="banner">${why}. ${data ? 'Showing the last reading. ' : ''}Is <code>node server.mjs</code> running?</div>`;
     } finally {

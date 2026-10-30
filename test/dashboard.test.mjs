@@ -468,12 +468,23 @@ test('the Workspace panel shows the auto-update row in every state, with text wa
 const hang = (init) => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
 const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(setImmediate); };
 
-test('every page request is bounded: quotas 60 s, version 10 s, workspace and pipeline unchanged', async () => {
+test('every page request is bounded: quotas at least 60 s, version 10 s, workspace and pipeline unchanged', async () => {
   const requests = [];
   const { signals } = await loadDashboard({ respond: (url, init) => { requests.push([url.split('?')[0], init?.signal]); } });
   const bounds = requests.map(([url, signal]) => [url, signals.find((s) => s.controller.signal === signal)?.ms]);
   assert.deepEqual(Object.fromEntries(bounds), { '/api/version': 10_000, '/api/quotas': 60_000, '/api/workspace': 12_000, '/api/pipeline': 100_000 });
   assert.equal(bounds.length, 4);
+});
+
+test('the quota timeout grows by 30 s per account in the last reading, since the server reads accounts one at a time', async () => {
+  const many = (n) => quotasOf(...Array.from({ length: n }, (_, i) => account(`claude:${i}`, [win('5-hour', 10, 9000)])));
+  for (const [n, ms] of [[0, 60_000], [1, 60_000], [2, 75_000], [5, 165_000]]) {
+    const { run, signals } = await loadDashboard({ quotas: many(n), now: NOW });
+    assert.equal(run('quotaTimeoutMs()'), ms, `${n} accounts`);
+    const before = signals.length;
+    await run('load(true)');
+    assert.ok(signals.slice(before).some((s) => s.ms === ms), `${n} accounts: ${signals.slice(before).map((s) => s.ms)}`);
+  }
 });
 
 test('a hung quota request times out, keeps the last cards, stops claiming Live, and releases Refresh', async () => {
@@ -510,12 +521,12 @@ test('a hung quota request times out, keeps the last cards, stops claiming Live,
   run('load(true)'); // ignored while the hung request is in flight
   assert.equal(quotaRequests, 2);
 
-  expire(60_000);
+  expire(75_000); // two accounts: 15 s + 2 × 30 s
   await clicked;
   assert.equal(element('refresh').disabled, false);
   assert.equal(run('loading'), false);
   const banner = element('banner').innerHTML;
-  assert.ok(banner.includes("The quota server didn't answer within 60 s. Showing the last reading."), banner);
+  assert.ok(banner.includes("The quota server didn't answer within 75 s. Showing the last reading."), banner);
   for (const raw of ['TimeoutError', 'AbortError', 'aborted', 'timed out']) assert.ok(!banner.includes(raw), `${raw} in ${banner}`);
   const [liveCard, staleCard] = cards();
   assert.ok(liveCard.includes('<span class="big">70%</span>'), liveCard);
