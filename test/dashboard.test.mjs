@@ -10,6 +10,7 @@ const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
 // Pass `now` to pin Date (and Date.now) inside the page, so durations and percentages are deterministic.
 // `respond(url, init)` may return a reply (or a promise of one) to override the canned reply for that request.
 // `AbortSignal.timeout(ms)` never fires on its own: `expire(ms)` aborts the pending signals made with that delay.
+// `media.fine` is what `matchMedia('(hover: hover) and (pointer: fine)')` answers: a mouse or trackpad.
 async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond } = {}) {
   const elements = new Map();
   function element(id) {
@@ -17,9 +18,22 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
       elements.set(id, {
         innerHTML: '', textContent: '', hidden: hidden(id), style: {}, setAttribute() {},
         getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 0, width: 200, height: 100 }),
+        querySelectorAll(selector) { return selector === '.win' ? winElements(this.innerHTML) : []; },
       });
     }
     return elements.get(id);
+  }
+  // Stub `.win` elements for the windows rendered in `html`, read from their attributes.
+  function winElements(html) {
+    return [...html.matchAll(/<div class="win"[^>]*>/g)].map(([tag]) => {
+      const attr = (name) => { const m = tag.match(new RegExp(` ${name}="([^"]*)"`)); return m && unescapeHtml(m[1]); };
+      const el = {
+        tag, getAttribute: attr, dataset: { a: attr('data-a'), w: attr('data-w'), key: attr('data-key') },
+        closest: (selector) => (selector === '.win' ? el : null), matches: (selector) => selector === '.win',
+        focus: () => { document.activeElement = el; },
+      };
+      return el;
+    });
   }
   const listeners = {};
   const timeouts = [];
@@ -30,9 +44,10 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
     }
   };
   const document = {
-    getElementById: element, visibilityState: 'visible', title: '',
+    getElementById: element, visibilityState: 'visible', title: '', activeElement: null,
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
   };
+  const media = { fine: true };
   const globals = {
     document,
     // `version: null` answers /api/version with a 404, like a server from before it existed.
@@ -41,6 +56,7 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
       : { ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? workspace : pipeline) }),
     AbortSignal: { timeout: (ms) => { const controller = new AbortController(); signals.push({ ms, controller }); return controller.signal; } },
     setInterval() {}, innerWidth: 1280, innerHeight: 800,
+    matchMedia: (query) => ({ matches: query === '(hover: hover) and (pointer: fine)' && media.fine }),
     setTimeout: (fn, ms) => { timeouts.push(ms); return timeouts.length; },
   };
   if (now != null) {
@@ -52,14 +68,25 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   const context = vm.createContext(globals);
   pageScript.runInContext(context);
   await new Promise(setImmediate);
+  // Fire a document event the way the browser would, and return it (to check `defaultPrevented`).
+  const dispatch = (type, fields) => {
+    const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...fields };
+    for (const fn of listeners[type] || []) fn(event);
+    return event;
+  };
+  // The rendered window `wi` of account `ai`, as a stub element.
+  const winEl = (ai, wi) => winElements(element('content').innerHTML).find((el) => el.dataset.a === String(ai) && el.dataset.w === String(wi));
   // Hover window `wi` of account `ai`, the way a pointer would, and return the tooltip's HTML.
-  const hover = (ai, wi) => {
-    const target = { closest: () => ({ dataset: { a: String(ai), w: String(wi) } }) };
-    for (const fn of listeners.pointermove) fn({ target, clientX: 10, clientY: 10 });
+  const hover = (ai, wi, pointerType = 'mouse') => {
+    dispatch('pointermove', { target: winEl(ai, wi), pointerType, clientX: 10, clientY: 10 });
     return element('tip').innerHTML;
   };
-  return { context, document, element, timeouts, signals, expire, hover, run: (code) => vm.runInContext(code, context) };
+  const click = (el) => dispatch('click', { target: el });
+  const press = (el, key, fields = {}) => dispatch('keydown', { target: el, key, ...fields });
+  return { context, document, element, media, listeners, timeouts, signals, expire, dispatch, winEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
 }
+
+const unescapeHtml = (s) => s.replace(/&(quot|#39|lt|gt|amp);/g, (_, e) => ({ quot: '"', '#39': "'", lt: '<', gt: '>', amp: '&' })[e]);
 
 test('dashboard renders diagnostics, escapes machine-supplied names, and retains readings on failure', async () => {
   const now = Date.now();
@@ -379,6 +406,175 @@ test('the tooltip lists exact numbers for a window, plus its share of the weekly
   assert.ok(share.includes('<div><span class="k">Window:</span> 7 days</div><div><span class="k">Allowance:</span> 25% of the weekly limit</div>'), share);
   assert.ok(share.includes('<span class="k">Time left:</span> 50% of window'), share);
   for (const text of [tip, share]) assertClean(text);
+});
+
+// A rendered window's details block: whether it is hidden, and its contents.
+function detailsOf(html, id) {
+  const m = html.match(new RegExp(`<div class="win-details" id="${id}"( hidden)?>([\\s\\S]*?)</div>\\s+</div>`)); // rows are joined with no space between them
+  assert.ok(m, `no details block ${id} in ${html}`);
+  return { hidden: !!m[1], html: m[2] };
+}
+const expanded = (page) => winsOf(page.element('content').innerHTML).map((w) => w.match(/aria-expanded="(true|false)"/)[1] === 'true');
+
+test('a window is a button that opens its details inline by click or tap, and only that window', async () => {
+  const page = await renderQuotas(quotasOf(
+    account('claude:a', [win('5-hour', 30, 9000), win('Weekly', 40, 302_400, WEEK, { shareOfWeeklyPct: 25 })]),
+    account('openai:b', [win('5-hour', 20, 9000)], { provider: 'openai', name: 'ChatGPT', plan: 'Plus' }),
+  ));
+  const { element, winEl, click, run } = page;
+  const html = () => element('content').innerHTML;
+  for (const [ai, wi] of [[0, 0], [0, 1], [1, 0]]) {
+    const el = winEl(ai, wi);
+    assert.equal(el.getAttribute('role'), 'button');
+    assert.equal(el.getAttribute('tabindex'), '0');
+    assert.equal(el.getAttribute('aria-expanded'), 'false');
+    assert.equal(el.getAttribute('aria-controls'), `win-${ai}-${wi}-details`);
+    assert.equal(el.getAttribute('aria-describedby'), null);
+    assert.deepEqual(detailsOf(html(), `win-${ai}-${wi}-details`), { hidden: true, html: '' });
+  }
+  assert.equal(winsOf(html()).filter((w) => w.includes('<span class="win-more" aria-hidden="true">▸ Details</span>')).length, 3);
+
+  click(winEl(0, 1));
+  assert.deepEqual(expanded(page), [false, true, false]);
+  const opened = winEl(0, 1);
+  assert.equal(opened.getAttribute('aria-describedby'), 'win-0-1-details');
+  const details = detailsOf(html(), 'win-0-1-details');
+  assert.equal(details.hidden, false);
+  // The same rows the hover tooltip shows, built by the same function.
+  assert.equal(details.html, run('tipHtml(data.accounts[0], data.accounts[0].windows[1], view(data.accounts[0].windows[1], Date.now()))'));
+  for (const row of ['<span class="k">Used:</span> 40%', '<span class="k">Window:</span> 7 days', '<span class="k">Allowance:</span> 25% of the weekly limit', '<span class="k">Time left:</span> 50% of window']) {
+    assert.ok(details.html.includes(row), row);
+  }
+  assert.ok(winsOf(html())[1].includes('▾ Details'), winsOf(html())[1]);
+  assert.equal(detailsOf(html(), 'win-0-0-details').hidden, true);
+  assertClean(html());
+
+  click(winEl(1, 0));
+  assert.deepEqual(expanded(page), [false, true, true]);
+  click(winEl(0, 1));
+  assert.deepEqual(expanded(page), [false, false, true]);
+  assert.deepEqual(detailsOf(html(), 'win-0-1-details'), { hidden: true, html: '' });
+
+  // Finishing a text selection inside a window doesn't toggle it.
+  run('globalThis.getSelection = () => "Used: 20%"');
+  click(winEl(1, 0));
+  assert.deepEqual(expanded(page), [false, false, true]);
+});
+
+test('Enter and Space toggle a focused window, Escape collapses it, and focus stays on that window', async () => {
+  const page = await renderQuotas(quotasOf(account('claude:a', [win('5-hour', 30, 9000), win('Weekly', 40, 302_400, WEEK)])));
+  const { document, winEl, press } = page;
+  winEl(0, 1).focus();
+  const focusedKey = () => document.activeElement?.dataset.key;
+  const key = winEl(0, 1).dataset.key;
+
+  let e = press(winEl(0, 1), 'Enter');
+  assert.ok(e.defaultPrevented);
+  assert.deepEqual(expanded(page), [false, true]);
+  // render() replaced the element; focus moved to the new one for the same window.
+  assert.equal(focusedKey(), key);
+  assert.equal(document.activeElement.getAttribute('aria-expanded'), 'true');
+
+  e = press(winEl(0, 1), 'Escape');
+  assert.ok(e.defaultPrevented);
+  assert.deepEqual(expanded(page), [false, false]);
+  assert.equal(focusedKey(), key);
+
+  e = press(winEl(0, 1), ' ');
+  assert.ok(e.defaultPrevented, 'Space must not scroll the page');
+  assert.deepEqual(expanded(page), [false, true]);
+  assert.equal(focusedKey(), key);
+  e = press(winEl(0, 1), ' ', { repeat: true }); // holding Space doesn't flicker it
+  assert.ok(e.defaultPrevented);
+  assert.deepEqual(expanded(page), [false, true]);
+  e = press(winEl(0, 1), ' ');
+  assert.deepEqual(expanded(page), [false, false]);
+
+  // Escape on a collapsed window, other keys, and shortcuts are left to the browser.
+  for (const [k, fields] of [['Escape', {}], ['a', {}], ['Tab', {}], ['Enter', { ctrlKey: true }], [' ', { altKey: true }]]) {
+    assert.equal(press(winEl(0, 1), k, fields).defaultPrevented, false, k);
+    assert.deepEqual(expanded(page), [false, false], k);
+  }
+  // Keys from inside a window's content aren't the window's.
+  assert.equal(page.dispatch('keydown', { target: { closest: () => winEl(0, 0) }, key: 'Enter' }).defaultPrevented, false);
+  assert.deepEqual(expanded(page), [false, false]);
+});
+
+test('expanded details survive re-renders, refreshes with reordered accounts and the Table view, and vanished windows are forgotten', async () => {
+  const quotas = quotasOf(
+    account('claude:a', [win('5-hour', 30, 9000), win('Weekly', 40, 302_400, WEEK)]),
+    account('openai:b', [win('5-hour', 20, 9000), win('Weekly', 10, 302_400, WEEK)], { provider: 'openai', name: 'ChatGPT', plan: 'Plus' }),
+  );
+  const page = await loadDashboard({ quotas, now: NOW });
+  const { element, winEl, click, run } = page;
+  const html = () => element('content').innerHTML;
+  click(winEl(0, 1)); // claude:a Weekly
+  assert.deepEqual(expanded(page), [false, true, false, false]);
+
+  run('render()');
+  assert.deepEqual(expanded(page), [false, true, false, false]);
+
+  // A refresh puts ChatGPT first and changes the numbers: the same account's window stays open, with the new reading.
+  const [claude, chatgpt] = quotas.accounts;
+  claude.windows[1].usedPct = 65;
+  quotas.accounts = [chatgpt, claude];
+  await element('refresh').onclick();
+  assert.deepEqual(expanded(page), [false, false, false, true]);
+  assert.equal(winEl(1, 1).getAttribute('aria-controls'), 'win-1-1-details');
+  const details = detailsOf(html(), 'win-1-1-details');
+  assert.equal(details.hidden, false);
+  assert.ok(details.html.includes('<span class="k">Claude Max:</span> Weekly'), details.html);
+  assert.ok(details.html.includes('<span class="k">Used:</span> 65%') && details.html.includes('<span class="k">Left:</span> 35%'), details.html);
+
+  // The Table view is unchanged, and switching back keeps the window open.
+  element('view').onclick();
+  assert.ok(!html().includes('Details') && !html().includes('class="win"'), html());
+  element('view').onclick();
+  assert.deepEqual(expanded(page), [false, false, false, true]);
+
+  // A window that disappears is forgotten, so it comes back collapsed.
+  claude.windows.pop();
+  await run('load(true)');
+  assert.equal(run('openWindows.size'), 0);
+  claude.windows.push(win('Weekly', 65, 302_400, WEEK));
+  await run('load(true)');
+  assert.deepEqual(expanded(page), [false, false, false, false]);
+});
+
+test('the hover tooltip shows only for a fine pointer, never on focus or touch, and never outlives a re-render', async () => {
+  const page = await renderQuotas(quotasOf(account('claude:a', [win('5-hour', 30, 9000), win('Weekly', 40, 302_400, WEEK)])));
+  const { element, media, listeners, winEl, hover, click, dispatch, run } = page;
+  const tip = element('tip');
+  const shown = () => tip.style.display === 'block';
+  assert.equal(listeners.focusin, undefined, 'focus no longer opens the tooltip');
+  assert.equal(listeners.focusout, undefined);
+
+  hover(0, 0);
+  assert.ok(shown());
+  assert.ok(tip.innerHTML.includes('<span class="k">Used:</span> 30%'), tip.innerHTML);
+  dispatch('pointermove', { target: { closest: () => null }, pointerType: 'mouse' });
+  assert.ok(!shown());
+
+  hover(0, 0);
+  run('render()');
+  assert.ok(!shown(), 'a re-render hides it');
+  hover(0, 0);
+  run('tableView = true; render(); tableView = false; render();');
+  assert.ok(!shown());
+
+  hover(0, 0, 'touch');
+  assert.ok(!shown(), 'touch');
+  media.fine = false;
+  hover(0, 0);
+  assert.ok(!shown(), 'coarse pointer or no hover');
+  media.fine = true;
+
+  // An expanded window already shows the same rows inline, so it gets no tooltip.
+  click(winEl(0, 1));
+  hover(0, 1);
+  assert.ok(!shown());
+  hover(0, 0);
+  assert.ok(shown());
 });
 
 test('the meta line shows the running commit and warns in text when it is not current', async () => {
