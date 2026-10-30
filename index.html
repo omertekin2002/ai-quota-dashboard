@@ -310,6 +310,15 @@
   let workspaceLoading = false;
   let workspaceError = false;
 
+  // A signal that aborts after `ms`. Safari before 16 has no AbortSignal.timeout, so fall back to a timer
+  // (its plain abort is an AbortError, which load() also reports as a timeout).
+  function timeoutSignal(ms) {
+    if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), ms);
+    return controller.signal;
+  }
+
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const md = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
 
@@ -535,7 +544,7 @@
     if (workspaceLoading) return;
     workspaceLoading = true;
     try {
-      const res = await fetch(`/api/workspace${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(12_000) });
+      const res = await fetch(`/api/workspace${force ? '?force' : ''}`, { cache: 'no-store', signal: timeoutSignal(12_000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       workspace = await res.json();
       workspaceError = false;
@@ -712,7 +721,7 @@
     if (pipelineLoading) return;
     pipelineLoading = true;
     try {
-      const res = await fetch(`/api/pipeline${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(100_000) });
+      const res = await fetch(`/api/pipeline${force ? '?force' : ''}`, { cache: 'no-store', signal: timeoutSignal(100_000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       pipeline = await res.json();
       pipelineError = false;
@@ -901,7 +910,8 @@
     return ` · running ${sha(v.commit)}${warnings.map((w) => ` · <span class="version-warn">${w}</span>`).join('')}`;
   }
 
-  function render() {
+  // `tick` is the 15-second clock update, as opposed to a render for new data or a toggle.
+  function render(tick = false) {
     if (!data) return;
     const now = Date.now();
     const live = new Set(data.accounts.flatMap((a) => (a.windows || []).map((w) => windowKey(a, w))));
@@ -917,12 +927,19 @@
     // Replacing the cards would drop keyboard focus, so put it back on the same window afterwards.
     const active = document.activeElement;
     const focusKey = active?.matches?.('.win') ? active.dataset.key : null;
-    $('content').innerHTML = tableView
-      ? renderTable(now)
-      : `<div class="grid">${data.accounts.map((a, ai) => renderCard(a, now, ai)).join('')}</div>`;
-    hideTip(); // it describes a card that no longer exists
-    if (focusKey != null && !tableView) {
-      [...$('content').querySelectorAll('.win')].find((el) => el.dataset.key === focusKey)?.focus({ preventScroll: true });
+    // But a clock tick leaves the cards alone while a window has focus: moving focus makes a screen reader
+    // read the window out again. The next load or toggle redraws them.
+    if (!(tick && focusKey != null)) {
+      $('content').innerHTML = tableView
+        ? renderTable(now)
+        : `<div class="grid">${data.accounts.map((a, ai) => renderCard(a, now, ai)).join('')}</div>`;
+      // The tooltip described a card that no longer exists. A resting pointer sends no pointermove,
+      // so show it again for the window now under the pointer, if any.
+      const under = tip.style.display === 'block' && !tableView ? document.elementFromPoint(tipAt.x, tipAt.y)?.closest?.('.win') : null;
+      if (under && !openWindows.has(under.dataset.key)) showTip(under, tipAt.x, tipAt.y); else hideTip();
+      if (focusKey != null && !tableView) {
+        [...$('content').querySelectorAll('.win')].find((el) => el.dataset.key === focusKey)?.focus({ preventScroll: true });
+      }
     }
     $('legend').hidden = tableView;
 
@@ -934,8 +951,9 @@
     document.title = tight.length ? `${tight.map((n) => `${n}%`).join(' · ')} · Quotas` : 'Quotas';
 
     // Once a live window passes its reset time, fetch fresh numbers shortly after.
+    // Not while loads are failing: the 2-minute poll retries then, so a struggling server isn't forced every 20 s.
     const passed = data.accounts.some((a) => !a.stale && a.windows?.some((w) => w.resetsAt && w.resetsAt <= now));
-    if (passed && !reloadTimer) reloadTimer = setTimeout(() => { reloadTimer = null; load(true); }, 20_000);
+    if (passed && !quotaError && !reloadTimer) reloadTimer = setTimeout(() => { reloadTimer = null; load(true); }, 20_000);
   }
 
   // Every request is bounded, so a stalled server can't keep `loading` (and Refresh) stuck.
@@ -949,11 +967,11 @@
     if (loading) return;
     loading = true;
     // Optional: an older server has no /api/version, and a failed read keeps the last one.
-    const versionReq = fetch('/api/version', { cache: 'no-store', signal: AbortSignal.timeout(VERSION_TIMEOUT_MS) })
+    const versionReq = fetch('/api/version', { cache: 'no-store', signal: timeoutSignal(VERSION_TIMEOUT_MS) })
       .then((r) => (r.ok ? r.json() : null)).catch(() => null);
     const timeoutMs = quotaTimeoutMs();
     try {
-      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
+      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store', signal: timeoutSignal(timeoutMs) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
       quotaError = false;
@@ -1000,8 +1018,10 @@
   // Hover preview with the same numbers, only for a mouse or trackpad: touch and keyboard use the details instead.
   const tip = $('tip');
   const canHover = () => typeof matchMedia === 'function' && matchMedia('(hover: hover) and (pointer: fine)').matches;
+  let tipAt = null; // the pointer position the tooltip was last shown for
   function hideTip() { $('tip').style.display = 'none'; }
   function showTip(el, x, y) {
+    tipAt = { x, y };
     const a = data.accounts[+el.dataset.a], w = a.windows[+el.dataset.w];
     tip.innerHTML = tipHtml(a, w, view(w, Date.now()));
     tip.style.display = 'block';
@@ -1015,6 +1035,8 @@
     if (el && e.pointerType !== 'touch' && canHover() && !openWindows.has(el.dataset.key)) showTip(el, e.clientX, e.clientY);
     else hideTip();
   });
+  // Leaving the page sends no pointermove outside it, and re-renders would keep showing the tooltip.
+  document.addEventListener('pointerout', (e) => e.relatedTarget == null && hideTip());
 
   $('refresh').onclick = () => refreshAll(true);
   $('view').onclick = () => {
@@ -1028,7 +1050,7 @@
   setInterval(() => document.visibilityState === 'visible' && loadWorkspace(), 30_000);
   setInterval(() => document.visibilityState === 'visible' && loadPipeline(), 60_000);
   setInterval(load, 120_000);
-  setInterval(() => { render(); renderWorkspace(); renderPipeline(); }, 15_000);
+  setInterval(() => { render(true); renderWorkspace(); renderPipeline(); }, 15_000);
 </script>
 </body>
 </html>
