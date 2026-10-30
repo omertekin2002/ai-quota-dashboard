@@ -10,8 +10,12 @@ const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
 // Pass `now` to pin Date (and Date.now) inside the page, so durations and percentages are deterministic.
 // `respond(url, init)` may return a reply (or a promise of one) to override the canned reply for that request.
 // `AbortSignal.timeout(ms)` never fires on its own: `expire(ms)` aborts the pending signals made with that delay.
+// Pass `abortSignalTimeout: false` for a browser without it (Safari before 16).
+// `setTimeout` never fires on its own either: `timers` holds each callback with its delay, and `timeouts` just the delays.
+// `setInterval` callbacks are kept in `intervals` the same way; `tick()` fires the 15-second clock update.
+// `document.elementFromPoint` answers null (the pointer is over nothing) until a test replaces it.
 // `media.fine` is what `matchMedia('(hover: hover) and (pointer: fine)')` answers: a mouse or trackpad.
-async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond } = {}) {
+async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond, abortSignalTimeout = true } = {}) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
@@ -37,6 +41,8 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   }
   const listeners = {};
   const timeouts = [];
+  const timers = []; // { fn, ms } for each setTimeout
+  const intervals = []; // { fn, ms } for each setInterval
   const signals = []; // { ms, controller } for each AbortSignal.timeout the page asked for
   const expire = (ms) => {
     for (const s of signals) {
@@ -44,7 +50,7 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
     }
   };
   const document = {
-    getElementById: element, visibilityState: 'visible', title: '', activeElement: null,
+    getElementById: element, visibilityState: 'visible', title: '', activeElement: null, elementFromPoint: () => null,
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
   };
   const media = { fine: true };
@@ -54,10 +60,11 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
     fetch: async (url, init) => respond?.(url, init) ?? (url.startsWith('/api/version')
       ? { ok: version != null, status: version != null ? 200 : 404, json: async () => version }
       : { ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? workspace : pipeline) }),
-    AbortSignal: { timeout: (ms) => { const controller = new AbortController(); signals.push({ ms, controller }); return controller.signal; } },
-    setInterval() {}, innerWidth: 1280, innerHeight: 800,
+    AbortSignal: abortSignalTimeout ? { timeout: (ms) => { const controller = new AbortController(); signals.push({ ms, controller }); return controller.signal; } } : {},
+    AbortController,
+    setInterval: (fn, ms) => { intervals.push({ fn, ms }); }, innerWidth: 1280, innerHeight: 800,
     matchMedia: (query) => ({ matches: query === '(hover: hover) and (pointer: fine)' && media.fine }),
-    setTimeout: (fn, ms) => { timeouts.push(ms); return timeouts.length; },
+    setTimeout: (fn, ms) => { timeouts.push(ms); timers.push({ fn, ms }); return timeouts.length; },
   };
   if (now != null) {
     globals.Date = class extends Date {
@@ -83,7 +90,7 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   };
   const click = (el) => dispatch('click', { target: el });
   const press = (el, key, fields = {}) => dispatch('keydown', { target: el, key, ...fields });
-  return { context, document, element, media, listeners, timeouts, signals, expire, dispatch, winEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
+  return { context, document, element, media, listeners, timeouts, timers, intervals, tick: () => intervals.find((i) => i.ms === 15_000).fn(), signals, expire, dispatch, winEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
 }
 
 const unescapeHtml = (s) => s.replace(/&(quot|#39|lt|gt|amp);/g, (_, e) => ({ quot: '"', '#39': "'", lt: '<', gt: '>', amp: '&' })[e]);
@@ -541,9 +548,9 @@ test('expanded details survive re-renders, refreshes with reordered accounts and
   assert.deepEqual(expanded(page), [false, false, false, false]);
 });
 
-test('the hover tooltip shows only for a fine pointer, never on focus or touch, and never outlives a re-render', async () => {
+test('the hover tooltip shows only for a fine pointer, never on focus or touch, and follows a re-render to the window under the pointer', async () => {
   const page = await renderQuotas(quotasOf(account('claude:a', [win('5-hour', 30, 9000), win('Weekly', 40, 302_400, WEEK)])));
-  const { element, media, listeners, winEl, hover, click, dispatch, run } = page;
+  const { document, element, media, listeners, winEl, hover, click, dispatch, run, tick } = page;
   const tip = element('tip');
   const shown = () => tip.style.display === 'block';
   assert.equal(listeners.focusin, undefined, 'focus no longer opens the tooltip');
@@ -555,12 +562,28 @@ test('the hover tooltip shows only for a fine pointer, never on focus or touch, 
   dispatch('pointermove', { target: { closest: () => null }, pointerType: 'mouse' });
   assert.ok(!shown());
 
+  // A re-render replaces the cards, and a resting pointer sends no pointermove. So the tooltip shows again,
+  // with fresh numbers, for the window now under the pointer, and hides when there is none.
   hover(0, 0);
   run('render()');
-  assert.ok(!shown(), 'a re-render hides it');
+  assert.ok(!shown(), 'nothing under the pointer');
+  const asked = [];
+  document.elementFromPoint = (x, y) => { asked.push([x, y]); return winEl(0, 0); };
   hover(0, 0);
+  run('data.accounts[0].windows[0].usedPct = 35; render();');
+  tick();
+  assert.ok(shown(), 'the clock tick and a reload keep it');
+  assert.ok(tip.innerHTML.includes('<span class="k">Used:</span> 35%'), tip.innerHTML);
+  assert.deepEqual(asked, [[10, 10], [10, 10]]);
+  dispatch('pointerout', { relatedTarget: winEl(0, 1) });
+  assert.ok(shown(), 'moving within the page keeps it');
+  dispatch('pointerout', { relatedTarget: null });
+  assert.ok(!shown(), 'leaving the page hides it');
+  run('render()');
+  assert.ok(!shown(), 'and a re-render does not bring it back');
   run('tableView = true; render(); tableView = false; render();');
-  assert.ok(!shown());
+  assert.ok(!shown(), 'the Table view has no windows');
+  document.elementFromPoint = () => null;
 
   hover(0, 0, 'touch');
   assert.ok(!shown(), 'touch');
@@ -575,6 +598,33 @@ test('the hover tooltip shows only for a fine pointer, never on focus or touch, 
   assert.ok(!shown());
   hover(0, 0);
   assert.ok(shown());
+  document.elementFromPoint = () => winEl(0, 1);
+  run('render()');
+  assert.ok(!shown(), 'nor after a re-render puts it under the pointer');
+});
+
+test('the 15-second clock tick leaves the cards alone while a window has focus, so a screen reader does not read it again', async () => {
+  const page = await renderQuotas(quotasOf(account('claude:a', [win('5-hour', 30, 9000), win('Weekly', 40, 302_400, WEEK)])));
+  const { document, element, winEl, run, tick } = page;
+  const html = () => element('content').innerHTML;
+  run('data.accounts[0].windows[0].usedPct = 50;');
+  tick();
+  assert.ok(html().includes('<span class="big">50%</span>'), 'without focus the tick redraws');
+
+  const focused = winEl(0, 1);
+  focused.focus();
+  const before = html();
+  run('data.accounts[0].windows[0].usedPct = 60;');
+  tick();
+  assert.equal(html(), before);
+  assert.equal(document.activeElement, focused, 'focus did not move');
+  assert.equal(document.title, '40% · Quotas', 'the tab title still updates');
+
+  // A load or a toggle still redraws, and keeps focus on the same window.
+  run('render()');
+  assert.ok(html().includes('<span class="big">40%</span>'), html());
+  assert.notEqual(document.activeElement, focused);
+  assert.equal(document.activeElement.dataset.key, focused.dataset.key);
 });
 
 test('the meta line shows the running commit and warns in text when it is not current', async () => {
@@ -823,4 +873,57 @@ test('a hung version request holds quotas only until its own 10 s timeout, and t
   assert.ok(page.element('content').innerHTML.includes('● Live'));
   assert.ok(page.element('meta').innerHTML.includes('<code>abc1234</code>'), page.element('meta').innerHTML);
   assert.equal(page.element('banner').innerHTML, '');
+});
+
+test('without AbortSignal.timeout (Safari before 16) every request still gets its timeout, and a hung quota load releases Refresh', async () => {
+  let hung = false;
+  const page = await loadDashboard({
+    abortSignalTimeout: false, quotas: quotasOf(account('claude:a', [win('5-hour', 30, 9000)])), now: NOW,
+    respond: (url, init) => (url.startsWith('/api/quotas') && hung ? hang(init) : undefined),
+  });
+  const { element, run, timers } = page;
+  assert.ok(element('content').innerHTML.includes('<span class="big">70%</span>'), element('content').innerHTML);
+  assert.equal(run('workspaceError || pipelineError'), false);
+  assert.deepEqual(timers.map((t) => t.ms), [10_000, 60_000, 12_000, 100_000]); // version, quotas, workspace, pipeline
+
+  hung = true;
+  const clicked = element('refresh').onclick();
+  await settle();
+  assert.equal(run('loading'), true);
+  assert.equal(element('refresh').disabled, true);
+  timers.filter((t) => t.ms === 60_000).at(-1).fn();
+  await clicked;
+  assert.equal(run('loading'), false);
+  assert.equal(element('refresh').disabled, false);
+  assert.ok(element('banner').innerHTML.includes("The quota server didn't answer within 60 s. Showing the last reading."), element('banner').innerHTML);
+});
+
+test('a live window past its reset reloads after 20 s, but not again while loads fail: the 2-minute poll retries then', async () => {
+  let fail = false;
+  let quotaRequests = 0;
+  const page = await loadDashboard({
+    quotas: quotasOf(account('claude:a', [win('5-hour', 30, -60)])), now: NOW,
+    respond: (url) => {
+      if (!url.startsWith('/api/quotas')) return undefined;
+      quotaRequests++;
+      return fail ? { ok: false, status: 500, json: async () => ({ error: 'internal error' }) } : undefined;
+    },
+  });
+  const { element, run, timers, tick } = page;
+  const reloads = () => timers.filter((t) => t.ms === 20_000);
+  assert.equal(reloads().length, 1);
+
+  fail = true;
+  reloads()[0].fn();
+  await settle();
+  assert.equal(quotaRequests, 2);
+  assert.ok(element('banner').innerHTML.includes("Can't reach the quota server (HTTP 500)"), element('banner').innerHTML);
+  run('render()');
+  tick();
+  assert.equal(reloads().length, 1, 'no forced reload while the last load failed');
+
+  fail = false;
+  await run('load()');
+  assert.equal(quotaRequests, 3);
+  assert.equal(reloads().length, 2, 'a successful load schedules it again');
 });
