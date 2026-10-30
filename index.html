@@ -293,6 +293,8 @@
   let data = null;
   let tableView = false;
   let loading = false;
+  let quotaError = false; // the last /api/quotas load failed, so readings on screen aren't live
+  let quotaTimeouts = 0; // /api/quotas timeouts in a row since the last successful load
   let reloadTimer = null;
   let version = null; // which commit the server runs, from /api/version
   let workspace = null;
@@ -816,13 +818,18 @@
       </div>`;
   }
 
+  // When an account's numbers were read: its own fetch time, else the payload's.
+  const readingAt = (a) => a.fetchedAt ?? data.generatedAt;
+
   function renderCard(a, now, ai) {
     const mono = a.provider === 'claude' ? '✳' : '◎';
     const sub = a.email || '';
     const via = `Read from ${a.sources?.join(' + ') || 'n/a'}`;
     const fresh = a.stale
       ? `<span class="fresh stale" title="${esc(`${a.error} ${via}`)}">◷ ${esc(ago(a.fetchedAt))}</span>`
-      : a.error ? '' : `<span class="fresh" title="${esc(via)}">● Live</span>`;
+      : a.error ? ''
+      : quotaError ? `<span class="fresh stale" title="${esc(`Couldn't refresh. ${via}`)}">◷ ${esc(ago(readingAt(a)))}</span>`
+      : `<span class="fresh" title="${esc(via)}">● Live</span>`;
     const body = a.windows?.length
       ? a.windows.map((w, wi) => renderWindow(a, w, now, ai, wi)).join('')
       : '';
@@ -852,7 +859,7 @@
           <td class="num">${pctText(v.left)}</td>
           <td class="num">${pctText(v.used)}</td>
           <td>${esc(resetText(w, v) || '–')}</td>
-          <td>${st ? esc(st.text) : v.unknown ? 'Usage unknown' : 'OK'}${a.stale ? ` (reading from ${esc(ago(a.fetchedAt))})` : ''}</td>
+          <td>${st ? esc(st.text) : v.unknown ? 'Usage unknown' : 'OK'}${a.stale || (quotaError && !a.error) ? ` (reading from ${esc(ago(readingAt(a)))})` : ''}</td>
         </tr>`;
       }),
     );
@@ -878,7 +885,8 @@
   function render() {
     if (!data) return;
     const now = Date.now();
-    $('meta').innerHTML = `Claude &amp; ChatGPT · updated ${esc(ago(data.generatedAt))}${versionHtml(version)}`;
+    const failed = quotaError ? ` · <span class="version-warn">⚠ Couldn't refresh</span>` : '';
+    $('meta').innerHTML = `Claude &amp; ChatGPT · updated ${esc(ago(data.generatedAt))}${failed}${versionHtml(version)}`;
     if (!data.accounts.length) {
       $('content').innerHTML = `<div class="empty">No Claude or ChatGPT logins found. Sign in with <code>claude</code> or <code>codex</code>, or add accounts to CLIProxyAPI (<code>~/.cli-proxy-api</code>).</div>`;
       $('legend').hidden = true;
@@ -901,18 +909,35 @@
     if (passed && !reloadTimer) reloadTimer = setTimeout(() => { reloadTimer = null; load(true); }, 20_000);
   }
 
+  // Every request is bounded, so a stalled server can't keep `loading` (and Refresh) stuck.
+  // The server reads accounts one after another, and each can take a 15 s profile lookup plus a 15 s usage request,
+  // so the quota timeout allows 30 s per account in the last reading (plus 15 s of slack), and never less than 60 s.
+  // Each timeout in a row doubles it (up to 10 min), so a collection bigger than the page knows about still gets through.
+  const quotaTimeoutMs = () => Math.min(600_000, Math.max(60_000, 15_000 + 30_000 * (data?.accounts?.length ?? 0)) * 2 ** quotaTimeouts);
+  const VERSION_TIMEOUT_MS = 10_000;
+
   async function load(force = false) {
     if (loading) return;
     loading = true;
     // Optional: an older server has no /api/version, and a failed read keeps the last one.
-    const versionReq = fetch('/api/version', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const versionReq = fetch('/api/version', { cache: 'no-store', signal: AbortSignal.timeout(VERSION_TIMEOUT_MS) })
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const timeoutMs = quotaTimeoutMs();
     try {
-      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store' });
+      const res = await fetch(`/api/quotas${force ? '?force' : ''}`, { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       data = await res.json();
+      quotaError = false;
+      quotaTimeouts = 0;
       $('banner').innerHTML = '';
     } catch (err) {
-      $('banner').innerHTML = `<div class="banner">Can't reach the quota server (${esc(err.message)}). Is <code>node server.mjs</code> running?</div>`;
+      quotaError = true;
+      const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+      if (timedOut) quotaTimeouts++;
+      const why = timedOut
+        ? `The quota server didn't answer within ${timeoutMs / 1000} s`
+        : `Can't reach the quota server (${esc(err?.message)})`;
+      $('banner').innerHTML = `<div class="banner">${why}. ${data ? 'Showing the last reading. ' : ''}Is <code>node server.mjs</code> running?</div>`;
     } finally {
       version = (await versionReq) || version;
       loading = false;
