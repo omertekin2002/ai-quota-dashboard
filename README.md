@@ -11,6 +11,14 @@ npm run json         # print current quotas as JSON and exit
 
 ## What it shows
 
+At the top, an **At a glance** strip answers three questions before you scroll. Each tile's title links to its full panel:
+
+- **Capacity**: one line per account with its tightest known window, its % left, the reset countdown and the same **⚠ Low** / **⛔ Nearly out** text as the cards. A stale account shows its reading age (◷), an account with no readable usage shows `—`, and a window past its reset says "Estimated". Accounts are never added up or compared with each other, because a percentage of one subscription isn't the same capacity as a percentage of another.
+- **Needs you**: how many items in the [Agent pipeline](#agent-pipeline)'s "Needs your attention" list are waiting on you, counted by kind (for example "2 blocked · 1 decision · 1 umbrella to merge"), with 🔥 when one is urgent. Otherwise it says "Nothing needs you".
+- **Workspace**: "All OK" when every [Workspace computer](#workspace-computer) reading is healthy. Otherwise it counts the critical (⛔) and warning (⚠) conditions and names the first two, such as "⛔ CLIProxyAPI check failed". The tile and the panels use the same level rules for services and their HTTP checks, memory, internet, battery, temperature, disks, the T7 backup and the auto-updater, so the two can't disagree.
+
+The strip adds no requests. It's built from the quota, pipeline and computer readings the page already loads, and it redraws whenever one of them does. When a source can't be read, only its own tile says so: "⚠ Couldn't refresh" with the age of the last reading, or "Unavailable" when there's none yet.
+
 For each account and limit window, including model-specific ones such as Claude's Fable-only weekly limit when your plan has one:
 
 - how much is left, as a % with a meter
