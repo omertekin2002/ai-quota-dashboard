@@ -927,3 +927,214 @@ test('a live window past its reset reloads after 20 s, but not again while loads
   assert.equal(quotaRequests, 3);
   assert.equal(reloads().length, 2, 'a successful load schedules it again');
 });
+
+// ---------- At a glance ----------
+// Healthy readings for every source; each scenario below changes one thing.
+const healthyWorkspace = () => ({
+  generatedAt: NOW, supported: true, model: 'HP laptop', uptimeSec: 10_000,
+  power: { acOnline: true, batteries: [{ percent: 100, status: 'Full' }] }, temperatures: [{ name: 'CPU', celsius: 50, criticalCelsius: 100 }],
+  memory: { usedPct: 50, usedBytes: 1024 ** 3, totalBytes: 2 * 1024 ** 3 }, internet: { state: 'online', latencyMs: 40 },
+  services: [{ name: 'CLIProxyAPI', unit: 'cli.service', state: 'running', automaticRestarts: 0 }, { name: 'T3 Code', unit: 't3code.service', state: 'running', automaticRestarts: 0 }],
+  diagnostics: { memoryLevel: 'healthy', pressure: { cpu: null, memory: null, io: null }, topProcesses: [],
+    disks: [{ name: 'T7 drive', path: '/mnt/nas', mounted: true, readOnly: false, usedPct: 40, freeBytes: 600 * 1024 ** 3, totalBytes: 1000 * 1024 ** 3 }],
+    backup: { state: 'success', lastSuccessAt: NOW - 3600_000, scheduleActive: true, nextRunAt: NOW + 3600_000 },
+    tailscale: { state: 'running', connections: [] },
+    healthChecks: [{ service: 'cli.service', id: 'cli-health', label: 'Backend health', state: 'healthy', detail: 'OK', checkedAt: NOW, latencyMs: 5 }] },
+  history: { events: [], samples: [], persisted: true },
+  autoUpdate: { state: 'ok', timerActive: true, lastRunAt: NOW - 60_000, lastExitStatus: 0, nextRunAt: NOW + 600_000 },
+});
+const pipelineOf = (attention = [], extra = {}) => ({ available: true, fetchedAt: NOW - 60_000, refreshMs: 300_000, error: null,
+  overview: { version: 1, attention, repos: [], github: { available: true, errors: [], truncated: [] } }, ...extra });
+const healthyQuotas = () => quotasOf(
+  account('claude:a', [win('5-hour', 20, 9000), win('Weekly', 40, 3 * 86400, WEEK)]),
+  account('openai:b', [win('5-hour', 50, 7200)], { provider: 'openai', name: 'ChatGPT', plan: 'Plus', email: 'b@example.com' }),
+);
+// A tile's visible text, with tags dropped and entities decoded.
+const tileText = (page, id) => unescapeHtml(page.element(`glance-${id}`).innerHTML.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+const tiles = (page) => Object.fromEntries(['capacity', 'attention', 'workspace'].map((id) => [id, tileText(page, id)]));
+const glancePage = (options = {}) => loadDashboard({ quotas: healthyQuotas(), workspace: healthyWorkspace(), pipeline: pipelineOf(), now: NOW, ...options });
+const failWith = (prefix) => (url) => (url.startsWith(prefix) ? { ok: false, status: 500, json: async () => ({ error: 'internal error' }) } : undefined);
+
+test('an At a glance strip sits under the top bar, above the Workspace computer panel, and each tile links to its panel', () => {
+  const strip = html.match(/<section class="overview" id="overview" aria-label="At a glance">([\s\S]*?)<\/section>/);
+  assert.ok(strip, 'the strip exists');
+  assert.ok(html.indexOf('<div class="top">') < strip.index);
+  assert.ok(strip.index < html.indexOf('aria-labelledby="workspace-title"'));
+  const links = [...strip[1].matchAll(/<h2><a href="#([\w-]+)">([^<]+)<\/a><\/h2><div id="glance-(\w+)">/g)].map((m) => m.slice(1));
+  assert.deepEqual(links, [['content', 'Capacity', 'capacity'], ['pipeline', 'Needs you', 'attention'], ['workspace', 'Workspace', 'workspace']]);
+  for (const [id] of links) assert.match(html, new RegExp(`<(div|section)[^>]* id="${id}"`), id);
+});
+
+test('At a glance, healthy: each account’s tightest window, nothing needs you, and the workspace is all OK', async () => {
+  const page = await glancePage();
+  const t = tiles(page);
+  assert.equal(t.capacity, 'Claude Max · a@example.com Weekly 60% left · resets in 3d ChatGPT Plus · b@example.com 5-hour 50% left · resets in 2h');
+  assert.equal(t.attention, '✓ Nothing needs you');
+  assert.equal(t.workspace, '✓ All OK');
+  for (const id of ['capacity', 'attention', 'workspace']) assertClean(page.element(`glance-${id}`).innerHTML.replace(/<\/?(p|ul|li|strong)( class="[^"]*")?>/g, ''));
+});
+
+test('At a glance, quota-constrained: the binding window with its level and reset, reading ages for stale accounts, and — for unknown usage', async () => {
+  const page = await glancePage({ quotas: quotasOf(
+    account('claude:a', [win('5-hour', 50, 9000), win('Weekly', 92, 2 * 86400 + 3 * 3600, WEEK)]),
+    account('claude:low', [win('5-hour', 75, 3600)], { email: 'low@example.com' }),
+    account('claude:stale', [win('5-hour', 20, 9000)], { email: 'stale@example.com', stale: true, fetchedAt: NOW - 3 * 3600_000, error: 'Token expired.' }),
+    account('openai:unknown', [win('5-hour', null, 3600), win('Weekly', null, 86400, WEEK)], { provider: 'openai', name: 'ChatGPT', email: 'u@example.com' }),
+    account('openai:err', [], { provider: 'openai', name: 'ChatGPT', email: 'e@example.com', error: 'Not signed in' }),
+    account('openai:reset', [win('5-hour', 70, -60)], { provider: 'openai', name: 'ChatGPT', email: 'r@example.com' }),
+  ) });
+  const rows = page.element('glance-capacity').innerHTML.split('<li class="glance-row">').slice(1).map((r) => unescapeHtml(r.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim());
+  assert.deepEqual(rows, [
+    'Claude Max · a@example.com Weekly 8% left · resets in 2d 3h ⛔ Nearly out',
+    'Claude Max · low@example.com 5-hour 25% left · resets in 1h ⚠ Low',
+    'Claude Max · stale@example.com 5-hour 80% left · resets in 2h 30m ◷ 3h ago',
+    'ChatGPT Max · u@example.com — Usage unknown',
+    "ChatGPT Max · e@example.com — Couldn't read usage",
+    'ChatGPT Max · r@example.com 5-hour 100% left · Estimated. Refreshing…',
+  ]);
+  assert.ok(page.element('glance-capacity').innerHTML.includes('<span class="critical">⛔ Nearly out</span>'));
+  assert.ok(!rows[3].includes('100%'));
+  // Nothing is summed or compared across accounts.
+  assert.ok(!/total|combined/i.test(tileText(page, 'capacity')));
+});
+
+test('At a glance, owner-blocked: the attention total, its count per kind, and 🔥 when one is urgent', async () => {
+  const item = (kind, number, extra = {}) => ({ kind, repo: 'o/alpha', number, url: `https://github.com/o/alpha/issues/${number}`, title: `item ${number}`, action: 'Act', ...extra });
+  const page = await glancePage({ pipeline: pipelineOf([item('needs-human', 8), item('needs-human', 9), item('decision', 14, { urgent: true }), item('umbrella', 20)]) });
+  assert.equal(tileText(page, 'attention'), '🔥 4 items need you 2 blocked · 1 decision · 1 umbrella to merge · 🔥 1 urgent');
+  assert.ok(page.element('glance-attention').innerHTML.includes('<p class="glance-lead critical">'));
+  // Kinds are build-workflow's own, in its order; an unknown kind is only counted.
+  page.run(`pipeline.overview.attention = [{ kind: 'review', number: 1 }, { kind: 'review', number: 2 }, { kind: 'something-new', number: 3 }]; renderPipeline();`);
+  assert.equal(tileText(page, 'attention'), '3 items need you 2 PRs to review · 1 other');
+  page.run(`pipeline.overview.attention = [{ kind: 'decision', number: 1 }]; pipeline.overview.github = { available: false, errors: ['down'] }; renderPipeline();`);
+  assert.equal(tileText(page, 'attention'), '1 item needs you 1 decision ⚠ GitHub unavailable: only local items are current');
+  assert.ok(page.element('glance-attention').innerHTML.includes('<p class="glance-lead warning">'));
+});
+
+test('At a glance, partially unavailable: each source failing on its own changes only its own tile', async () => {
+  const healthy = tiles(await glancePage());
+  const cases = {
+    '/api/quotas': { capacity: "⚠ Couldn't refresh" },
+    '/api/workspace': { workspace: 'Unavailable' },
+    '/api/pipeline': { attention: 'Pipeline unavailable' },
+  };
+  for (const [url, changed] of Object.entries(cases)) {
+    const page = await glancePage({ respond: failWith(url) });
+    assert.deepEqual(tiles(page), { ...healthy, ...changed }, url);
+  }
+
+  // A source that fails after a good reading keeps it, with its age.
+  let failing = null;
+  const page = await glancePage({ respond: (url, init) => (failing && url.startsWith(failing) ? failWith(failing)(url, init) : undefined) });
+  failing = '/api/pipeline';
+  await page.run('loadPipeline()');
+  assert.equal(tileText(page, 'attention'), "✓ Nothing needs you ⚠ Couldn't refresh · ◷ 1m ago");
+  failing = '/api/workspace';
+  await page.run('loadWorkspace()');
+  assert.equal(tileText(page, 'workspace'), "✓ All OK ⚠ Couldn't refresh · ◷ just now");
+  failing = '/api/quotas';
+  await page.run('load()');
+  const capacity = tileText(page, 'capacity');
+  assert.ok(capacity.startsWith('Claude Max · a@example.com Weekly 60% left · resets in 3d ◷ just now'), capacity);
+  assert.ok(capacity.endsWith("⚠ Couldn't refresh"), capacity);
+  assert.equal(tileText(page, 'attention'), "✓ Nothing needs you ⚠ Couldn't refresh · ◷ 1m ago");
+
+  // The pipeline's own last update failed, or the workspace reading is over 90 s old: both say how old.
+  const stale = await glancePage({ pipeline: pipelineOf([], { error: 'agentctl overview failed or timed out', fetchedAt: NOW - 900_000 }),
+    workspace: { ...healthyWorkspace(), generatedAt: NOW - 120_000 } });
+  assert.equal(tileText(stale, 'attention'), "✓ Nothing needs you ⚠ Couldn't refresh · ◷ 15m ago");
+  assert.equal(tileText(stale, 'workspace'), '✓ All OK ◷ 2m ago');
+  assert.equal(stale.element('workspace-error').hidden, false, 'the panel calls the same reading old');
+  const linux = await glancePage({ workspace: { supported: false } });
+  assert.equal(tileText(linux, 'workspace'), 'Monitoring is available on Linux');
+});
+
+test('At a glance: workspace conditions come from the same rules as the panels’ levels', async () => {
+  const workspace = healthyWorkspace();
+  workspace.diagnostics.healthChecks[0] = { ...workspace.diagnostics.healthChecks[0], state: 'unhealthy', detail: 'HTTP 503' };
+  workspace.diagnostics.backup = { ...workspace.diagnostics.backup, state: 'failed' };
+  workspace.diagnostics.memoryLevel = 'critical';
+  workspace.autoUpdate = { ...workspace.autoUpdate, state: 'failed', lastExitStatus: 1 };
+  const page = await glancePage({ workspace });
+  const conditions = JSON.parse(page.run('JSON.stringify(workspaceConditions(workspace))'));
+  assert.deepEqual(conditions, [
+    { level: 'critical', text: 'CLIProxyAPI check failed' },
+    { level: 'critical', text: 'Memory under pressure' },
+    { level: 'critical', text: 'T7 backup failed' },
+    { level: 'warning', text: 'Auto-update failed' },
+  ]);
+  // The panels show each of them at the same level.
+  const panel = page.element('workspace-content').innerHTML, diagnostics = page.element('workspace-diagnostics').innerHTML;
+  assert.ok(panel.includes('<div class="service-state critical"><span class="health-dot" aria-hidden="true"></span>Running · Check failed'), panel);
+  assert.ok(panel.includes('<div class="metric-value critical">50%'), 'memory metric');
+  assert.ok(diagnostics.includes('<div class="diagnostic-status critical">Memory under pressure'));
+  assert.ok(diagnostics.includes('<span class="diagnostic-status critical">Last run failed'));
+  assert.ok(panel.includes('<span class="warning">⚠ last run'), 'auto-update');
+  assert.equal(tileText(page, 'workspace'), '⛔ 3 critical · ⚠ 1 warning ⛔ CLIProxyAPI check failed · ⛔ Memory under pressure · +2 more');
+
+  // Every other rule, one at a time: the tile's level is the level the panel colors that reading with.
+  const cases = [
+    ['workspace.services[1].state = "failed"', 'critical', 'T3 Code failed', 'service-state critical'],
+    ['workspace.services[1].state = "not-found"', 'warning', 'T3 Code not installed', 'service-state warning'],
+    ['workspace.diagnostics.healthChecks.push({ service: "t3code.service", id: "t3", label: "Page", state: "unknown", detail: "Not checked yet", checkedAt: Date.now() })', 'warning', 'T3 Code Page: Not checked yet', 'health-check warning'],
+    ['workspace.diagnostics.memoryLevel = "warning"', 'warning', 'Memory needs attention', 'metric-value warning'],
+    ['workspace.internet.state = "offline"', 'critical', 'Internet offline', 'metric-value critical'],
+    ['workspace.internet.state = "portal"', 'warning', 'Network sign-in needed', 'metric-value warning'],
+    ['workspace.power = { acOnline: false, batteries: [{ percent: 25, status: "Discharging" }] }', 'warning', 'Battery 25% on battery power', 'metric-value warning'],
+    ['workspace.power = { acOnline: false, batteries: [{ percent: 8, status: "Discharging" }] }', 'critical', 'Battery 8% on battery power', 'metric-value critical'],
+    ['workspace.temperatures[0].celsius = 95', 'warning', 'CPU at 95°C', 'metric-value warning'],
+    ['workspace.diagnostics.disks[0].mounted = false', 'critical', 'T7 drive not mounted', 'diagnostic-status critical'],
+    ['workspace.diagnostics.disks[0].usedPct = 92', 'warning', 'T7 drive 92% full', 'diagnostic-status warning'],
+    ['workspace.diagnostics.backup.lastSuccessAt = Date.now() - 40 * 3600_000', 'warning', 'No successful T7 backup in 36h', 'diagnostic-status warning'],
+    ['workspace.diagnostics.backup.scheduleActive = false', 'warning', 'T7 backup schedule inactive', 'diagnostic-status warning'],
+    ['workspace.autoUpdate.timerActive = false', 'warning', 'Auto-update timer stopped', 'class="warning">⚠ timer stopped'],
+  ];
+  for (const [change, level, text, panelClass] of cases) {
+    const p = await glancePage();
+    assert.equal(p.run('JSON.stringify(workspaceConditions(workspace))'), '[]');
+    p.run(`${change}; renderWorkspace();`);
+    assert.deepEqual(JSON.parse(p.run('JSON.stringify(workspaceConditions(workspace))')), [{ level, text }], change);
+    assert.ok((p.element('workspace-content').innerHTML + p.element('workspace-diagnostics').innerHTML).includes(panelClass), `${change}: panel shows ${panelClass}`);
+    assert.ok(tileText(p, 'workspace').includes(`${level === 'critical' ? '⛔' : '⚠'} ${text}`), tileText(p, 'workspace'));
+  }
+});
+
+test('At a glance escapes account, window, service and check strings', async () => {
+  const evil = '<script>alert(1)</script>';
+  const workspace = healthyWorkspace();
+  workspace.services[0].name = evil;
+  workspace.diagnostics.healthChecks[0].state = 'unhealthy';
+  workspace.diagnostics.healthChecks.push({ service: 't3code.service', id: 'x', label: '<img src=x onerror=alert(1)>', state: 'unknown', detail: evil, checkedAt: NOW });
+  workspace.diagnostics.disks[0] = { ...workspace.diagnostics.disks[0], name: evil, mounted: false };
+  const page = await glancePage({
+    workspace,
+    quotas: quotasOf(account('claude:evil', [win(evil, 95, 3600)], { name: evil, plan: '<b>x</b>', email: '<img src=y>' }), account('claude:stale', [], { name: evil, error: evil })),
+  });
+  for (const id of ['capacity', 'attention', 'workspace']) {
+    const out = page.element(`glance-${id}`).innerHTML;
+    assert.ok(!/<(script|img|b)[\s>]/.test(out), out);
+  }
+  assert.ok(page.element('glance-capacity').innerHTML.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+  assert.ok(page.element('glance-workspace').innerHTML.includes('&lt;script&gt;alert(1)&lt;/script&gt; check failed'));
+  assert.ok(tileText(page, 'workspace').startsWith('⛔ 2 critical · ⚠ 1 warning'), tileText(page, 'workspace'));
+});
+
+test('At a glance adds no requests: load, every timer and Refresh fetch the same URLs as before', async () => {
+  const urls = [];
+  const page = await glancePage({ respond: (url) => { urls.push(url); } });
+  const fire = async (ms) => { for (const i of page.intervals.filter((x) => x.ms === ms)) i.fn(); await settle(); };
+  assert.deepEqual(page.intervals.map((i) => i.ms).sort((a, b) => a - b), [15_000, 30_000, 60_000, 120_000]);
+  assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas', '/api/workspace', '/api/pipeline'], 'on load');
+  await fire(15_000);
+  assert.deepEqual(urls.splice(0), [], 'the 15-second clock tick only re-renders');
+  await fire(30_000);
+  assert.deepEqual(urls.splice(0), ['/api/workspace'], '30-second timer');
+  await fire(60_000);
+  assert.deepEqual(urls.splice(0), ['/api/pipeline'], '1-minute timer');
+  await fire(120_000);
+  assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas'], '2-minute timer');
+  await page.element('refresh').onclick();
+  assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas?force', '/api/workspace?force', '/api/pipeline?force'], 'Refresh');
+  assert.equal(page.timers.length, 0, 'no new timers either');
+  assert.ok(!/fetch\(/.test(html.slice(html.indexOf('// ---------- At a glance'), html.indexOf('async function refreshAll'))), 'the tile code fetches nothing');
+});
