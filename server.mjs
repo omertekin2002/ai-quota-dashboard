@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AI quota dashboard: remaining 5-hour / weekly limits for Claude and ChatGPT (Codex) subscriptions.
+// AI quota dashboard: remaining limits for Claude, ChatGPT (Codex), and Antigravity subscriptions.
 //
 //   node server.mjs          serve the dashboard on http://localhost:7417
 //   node server.mjs --json   print current quotas as JSON and exit

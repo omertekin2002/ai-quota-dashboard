@@ -77,6 +77,7 @@
     font-weight: 700; font-size: 13px; color: var(--surface); }
   .mono.claude { background: var(--claude); }
   .mono.openai { background: var(--openai); }
+  .mono.antigravity { background: #3868ce; color: #fff; }
   .who { min-width: 0; }
   .who .name { font-weight: 650; font-size: 15px; display: flex; align-items: center; gap: 8px; }
   .plan { font-size: 11px; font-weight: 600; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
@@ -292,7 +293,6 @@
       <div class="meta" id="meta">Loading…</div>
     </div>
     <div class="actions">
-      <button id="view" aria-pressed="false">Table</button>
       <button id="refresh">Refresh</button>
     </div>
   </div>
@@ -328,7 +328,6 @@
 <script>
   const $ = (id) => document.getElementById(id);
   let data = null;
-  let tableView = false;
   const openWindows = new Set(); // windowKey()s whose details are expanded, kept across re-renders
   let loading = false;
   let quotaError = false; // the last /api/quotas load failed, so readings on screen aren't live
@@ -915,9 +914,9 @@
   // Derive everything the UI shows about one window at the current moment.
   // An unreadable usage figure stays unknown (left/used null, no level or projection), never "100% left".
   function view(w, now) {
-    let used = Number.isFinite(w.usedPct) ? w.usedPct : null;
+    let used = !w.disabled && Number.isFinite(w.usedPct) ? w.usedPct : null;
     let resetPassed = false;
-    if (w.resetsAt && w.resetsAt <= now) { used = 0; resetPassed = true; }
+    if (w.resetsAt && w.resetsAt <= now) { used = w.disabled || w.estimateReset === false ? null : 0; resetPassed = true; }
     const toReset = w.resetsAt && !resetPassed ? (w.resetsAt - now) / 1000 : null;
     if (used == null) {
       const timeLeftPct = toReset != null && w.windowSec ? Math.max(0, Math.min(100, (toReset / w.windowSec) * 100)) : null;
@@ -948,9 +947,10 @@
   }
 
   function resetText(w, v) {
+    if (w.disabled) return 'Quota unavailable';
     if (v.resetPassed) return 'reset since last reading';
     if (v.notStarted) return 'starts on first use';
-    if (v.toReset == null) return w.windowSec ? '' : 'resets with billing cycle';
+    if (v.toReset == null) return w.resetLabel || (w.windowSec ? '' : 'resets with billing cycle');
     return `resets in ${fmtDur(v.toReset)} · ${fmtClock(w.resetsAt)}`;
   }
 
@@ -987,7 +987,7 @@
   function renderWindow(a, w, now, ai, wi) {
     const v = view(w, now);
     const st = statusLabel(v);
-    const foot = footText(v, a.stale);
+    const foot = w.disabled ? { text: 'Quota disabled' } : footText(v, a.stale);
     const aria = `${w.label}: ${v.unknown ? 'usage unknown' : `${Math.round(v.left)} percent left`}, ${resetText(w, v)}`;
     const key = windowKey(a, w);
     const open = openWindows.has(key);
@@ -1015,8 +1015,8 @@
   const readingAt = (a) => a.fetchedAt ?? data.generatedAt;
 
   function renderCard(a, now, ai) {
-    const mono = a.provider === 'claude' ? '✳' : '◎';
-    const sub = a.email || '';
+    const mono = a.provider === 'claude' ? '✳' : a.provider === 'antigravity' ? '✦' : '◎';
+    const sub = a.email || (a.provider === 'antigravity' ? 'Local agy account' : '');
     const via = `Read from ${a.sources?.join(' + ') || 'n/a'}`;
     const fresh = a.stale
       ? `<span class="fresh stale" title="${esc(`${a.error} ${via}`)}">◷ ${esc(ago(a.fetchedAt))}</span>`
@@ -1041,26 +1041,6 @@
       </article>`;
   }
 
-  function renderTable(now) {
-    const rows = data.accounts.flatMap((a) =>
-      (a.windows || []).map((w) => {
-        const v = view(w, now);
-        const st = statusLabel(v);
-        return `<tr>
-          <td>${esc(a.name)} ${esc(a.plan || '')}<br><span style="color:var(--ink-muted)">${esc(a.email || '')}</span></td>
-          <td>${esc(w.label)}</td>
-          <td class="num">${pctText(v.left)}</td>
-          <td class="num">${pctText(v.used)}</td>
-          <td>${esc(resetText(w, v) || '–')}</td>
-          <td>${st ? esc(st.text) : v.unknown ? 'Usage unknown' : 'OK'}${a.stale || (quotaError && !a.error) ? ` (reading from ${esc(ago(readingAt(a)))})` : ''}</td>
-        </tr>`;
-      }),
-    );
-    return `<div class="table-scroll" role="region" aria-label="Quota table" tabindex="0"><table>
-      <thead><tr><th>Account</th><th>Window</th><th class="num">Left</th><th class="num">Used</th><th>Reset</th><th>Status</th></tr></thead>
-      <tbody>${rows.join('')}</tbody></table></div>`;
-  }
-
   // The running commit, linked on GitHub, plus a text warning when the server isn't running the latest code.
   const REPO_URL = 'https://github.com/omertekin2002/ai-quota-dashboard';
   function versionHtml(v) {
@@ -1083,9 +1063,9 @@
     const live = new Set(data.accounts.flatMap((a) => (a.windows || []).map((w) => windowKey(a, w))));
     for (const key of openWindows) if (!live.has(key)) openWindows.delete(key);
     const failed = quotaError ? ` · <span class="version-warn">⚠ Couldn't refresh</span>` : '';
-    $('meta').innerHTML = `Claude &amp; ChatGPT · updated ${esc(ago(data.generatedAt))}${failed}${versionHtml(version)}`;
+    $('meta').innerHTML = `Claude · ChatGPT · Antigravity · updated ${esc(ago(data.generatedAt))}${failed}${versionHtml(version)}`;
     if (!data.accounts.length) {
-      $('content').innerHTML = `<div class="empty">No Claude or ChatGPT logins found. Sign in with <code>claude</code> or <code>codex</code>, or add accounts to CLIProxyAPI (<code>~/.cli-proxy-api</code>).</div>`;
+      $('content').innerHTML = `<div class="empty">No supported logins found. Sign in with <code>claude</code>, <code>codex</code> or <code>agy</code>, or add accounts to CLIProxyAPI (<code>~/.cli-proxy-api</code>).</div>`;
       $('legend').hidden = true;
       hideTip();
       return;
@@ -1096,18 +1076,16 @@
     // But a clock tick leaves the cards alone while a window has focus: moving focus makes a screen reader
     // read the window out again. The next load or toggle redraws them.
     if (!(tick && focusKey != null)) {
-      $('content').innerHTML = tableView
-        ? renderTable(now)
-        : `<div class="grid">${data.accounts.map((a, ai) => renderCard(a, now, ai)).join('')}</div>`;
+      $('content').innerHTML = `<div class="grid">${data.accounts.map((a, ai) => renderCard(a, now, ai)).join('')}</div>`;
       // The tooltip described a card that no longer exists. A resting pointer sends no pointermove,
       // so show it again for the window now under the pointer, if any.
-      const under = tip.style.display === 'block' && !tableView ? document.elementFromPoint(tipAt.x, tipAt.y)?.closest?.('.win') : null;
+      const under = tip.style.display === 'block' ? document.elementFromPoint(tipAt.x, tipAt.y)?.closest?.('.win') : null;
       if (under && !openWindows.has(under.dataset.key)) showTip(under, tipAt.x, tipAt.y); else hideTip();
-      if (focusKey != null && !tableView) {
+      if (focusKey != null) {
         [...$('content').querySelectorAll('.win')].find((el) => el.dataset.key === focusKey)?.focus({ preventScroll: true });
       }
     }
-    $('legend').hidden = tableView;
+    $('legend').hidden = false;
 
     // Tab title: the tightest known window per account, e.g. "25% · 95%". Unknown windows are skipped.
     const tight = data.accounts
@@ -1124,9 +1102,10 @@
 
   // Every request is bounded, so a stalled server can't keep `loading` (and Refresh) stuck.
   // The server reads accounts one after another, and each can take a 15 s profile lookup plus a 15 s usage request,
-  // so the quota timeout allows 30 s per account in the last reading (plus 15 s of slack), and never less than 60 s.
+  // so allow 30 s per account in the last reading plus 15 s of slack.
+  // At least 105 s also covers agy's parallel 5 s version check + 90 s usage report.
   // Each timeout in a row doubles it (up to 10 min), so a collection bigger than the page knows about still gets through.
-  const quotaTimeoutMs = () => Math.min(600_000, Math.max(60_000, 15_000 + 30_000 * (data?.accounts?.length ?? 0)) * 2 ** quotaTimeouts);
+  const quotaTimeoutMs = () => Math.min(600_000, Math.max(105_000, 15_000 + 30_000 * (data?.accounts?.length ?? 0)) * 2 ** quotaTimeouts);
   const VERSION_TIMEOUT_MS = 10_000;
 
   async function load(force = false) {
@@ -1205,11 +1184,6 @@
   document.addEventListener('pointerout', (e) => e.relatedTarget == null && hideTip());
 
   $('refresh').onclick = () => refreshAll(true);
-  $('view').onclick = () => {
-    tableView = !tableView;
-    $('view').setAttribute('aria-pressed', tableView);
-    render();
-  };
   document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && refreshAll());
 
   refreshAll();

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { antigravityWindows } from '../antigravity.mjs';
 
 const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
 const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
@@ -175,21 +176,12 @@ test('dashboard shows unreadable usage as unknown, never as 100% left', async ()
   }
   assert.equal(document.title, '40% · Quotas');
 
-  vm.runInContext('tableView = true; render();', context);
-  const table = element('content').innerHTML;
-  const rows = table.split('<tr>').slice(2);
-  assert.equal(rows.length, 3);
-  assert.ok(rows[0].includes('40%') && rows[0].includes('60%') && rows[0].includes('OK'));
-  for (const row of rows.slice(1)) {
-    assert.equal(row.match(/<td class="num">—<\/td>/g).length, 2, row);
-    assert.ok(row.includes('Usage unknown'), row);
-  }
-  for (const text of [cards, table, document.title]) {
+  for (const text of [cards, document.title]) {
     for (const bad of ['NaN', 'null', 'undefined', '100%']) assert.ok(!text.includes(bad), `${bad} in ${text}`);
   }
 
   // Once the reset time passes, the window has refilled, so the estimate is 100% left again.
-  vm.runInContext(`data.accounts[1].windows[0].resetsAt = ${now - 1000}; tableView = false; render();`, context);
+  vm.runInContext(`data.accounts[1].windows[0].resetsAt = ${now - 1000}; render();`, context);
   assert.ok(element('content').innerHTML.includes('Estimated. Refreshing…'));
   assert.equal(document.title, '40% · 100% · Quotas');
 });
@@ -208,7 +200,6 @@ const account = (id, windows, extra = {}) => ({
 const quotasOf = (...accounts) => ({ generatedAt: NOW, accounts });
 const cardsOf = (html) => html.split('<article class="card">').slice(1);
 const winsOf = (html) => html.split('class="win"').slice(1);
-const tableRowsOf = (html) => html.split('<tr>').slice(2);
 const TAGS = 'div|span|article|header|code|table|thead|tbody|tr|th|td|br';
 
 // Rendered output never shows a broken value, and every `<` opens one of the page's own tags.
@@ -221,12 +212,8 @@ function assertClean(text) {
 async function renderQuotas(quotas) {
   const page = await loadDashboard({ quotas, now: NOW });
   const cards = page.element('content').innerHTML;
-  page.run('tableView = true; render();');
-  const table = page.element('content').innerHTML;
-  page.run('tableView = false; render();');
   assertClean(cards);
-  assertClean(table);
-  return { ...page, cards, table };
+  return { ...page, cards };
 }
 
 test('quota cards project the pace, warn before running out, and place the time-left tick', async () => {
@@ -280,7 +267,7 @@ test('a window that has not started says so and draws no time-left tick', async 
 });
 
 test('quota levels: Low at 30% left, Nearly out at 10%, Limit reached at 0% with clamping', async () => {
-  const { cards, table } = await renderQuotas(quotasOf(account('claude:a', [
+  const { cards } = await renderQuotas(quotasOf(account('claude:a', [
     win('Fine', 69, 9000),
     win('Low', 70, 9000),
     win('Low edge', 89, 9000),
@@ -304,23 +291,14 @@ test('quota levels: Low at 30% left, Nearly out at 10%, Limit reached at 0% with
     assert.ok(w.includes('<div class="fill" style="width:0%"></div>'), w);
   }
   assert.ok(over.includes('aria-label="Over: 0 percent left, '), over);
-
-  const rows = tableRowsOf(table);
-  assert.equal(rows.length, 6);
-  assert.ok(rows[0].includes('<td class="num">31%</td>') && rows[0].includes('<td>OK</td>'), rows[0]);
-  assert.ok(rows[1].includes('<td>⚠ Low</td>'), rows[1]);
-  assert.ok(rows[3].includes('<td>⛔ Nearly out</td>'), rows[3]);
-  assert.match(rows[5], /<td class="num">0%<\/td>\s*<td class="num">120%<\/td>/);
-  assert.ok(rows[5].includes('<td>⛔ Limit reached</td>'), rows[5]);
 });
 
 test('billing-cycle windows say so and draw no time-left tick', async () => {
-  const { cards, table, hover } = await renderQuotas(quotasOf(account('claude:a', [{ id: 'credits', label: 'Monthly', usedPct: 25 }])));
+  const { cards, hover } = await renderQuotas(quotasOf(account('claude:a', [{ id: 'credits', label: 'Monthly', usedPct: 25 }])));
   const [monthly] = winsOf(cards);
   assert.ok(monthly.includes('<span class="win-reset">resets with billing cycle</span>'), monthly);
   assert.ok(monthly.includes('<div class="fill" style="width:75%"></div>'), monthly);
   assert.ok(!monthly.includes('class="pace"') && !monthly.includes('At this pace'), monthly);
-  assert.ok(tableRowsOf(table)[0].includes('<td>resets with billing cycle</td>'), table);
   const tip = hover(0, 0);
   assert.ok(tip.includes('<span class="k">Window:</span> n/a'), tip);
   assert.ok(!tip.includes('Resets:') && !tip.includes('Time left:'), tip);
@@ -353,11 +331,6 @@ test('stale accounts show their reading age, put the error first, and never prom
   assert.ok(!page.cards.includes('Refreshing'), page.cards);
   assert.deepEqual(page.timeouts, []);
 
-  const rows = tableRowsOf(page.table);
-  assert.equal(rows.length, 4);
-  for (const row of rows.slice(0, 2)) assert.ok(row.includes(' (reading from 1h ago)</td>'), row);
-  for (const row of rows.slice(2)) assert.ok(!row.includes('reading from'), row);
-
   const tip = page.hover(0, 1);
   assert.ok(tip.includes('<span class="k">Reading:</span> from 1h ago'), tip);
   assertClean(tip);
@@ -368,7 +341,7 @@ test('stale accounts show their reading age, put the error first, and never prom
   assert.deepEqual(page.timeouts, [20_000]);
 });
 
-test('quota cards, table and tooltip escape account and window strings', async () => {
+test('quota cards and tooltip escape account and window strings', async () => {
   const evil = {
     name: '<img src=x onerror=alert(1)>', plan: '"><script>p()</script>', email: `o'neil"<b>@example.com`,
     error: '<img src=err> run `codex login` "now"',
@@ -379,11 +352,11 @@ test('quota cards, table and tooltip escape account and window strings', async (
     account('claude:evil-stale', windows, { ...evil, stale: true, fetchedAt: NOW - 120_000 }),
   ));
   const tips = [page.hover(0, 0), page.hover(0, 1), page.hover(1, 0)];
-  for (const text of [page.cards, page.table, ...tips]) {
+  for (const text of [page.cards, ...tips]) {
     assertClean(text);
     for (const raw of ['<img', '<script', '<b>', '<i>', `"'`]) assert.ok(!text.includes(raw), `${raw} in ${text}`);
   }
-  for (const text of [page.cards, page.table]) {
+  for (const text of [page.cards]) {
     for (const escaped of ['&lt;img src=x onerror=alert(1)&gt;', '&quot;&gt;&lt;script&gt;p()&lt;/script&gt;', 'o&#39;neil&quot;&lt;b&gt;@example.com', '&lt;img src=label&gt;', 'Week&quot;&#39;&lt;i&gt;']) {
       assert.ok(text.includes(escaped), `${escaped} missing from ${text}`);
     }
@@ -507,7 +480,7 @@ test('Enter and Space toggle a focused window, Escape collapses it, and focus st
   assert.deepEqual(expanded(page), [false, false]);
 });
 
-test('expanded details survive re-renders, refreshes with reordered accounts and the Table view, and vanished windows are forgotten', async () => {
+test('expanded details survive re-renders, refreshes with reordered accounts, and vanished windows are forgotten', async () => {
   const quotas = quotasOf(
     account('claude:a', [win('5-hour', 30, 9000), win('Weekly', 40, 302_400, WEEK)]),
     account('openai:b', [win('5-hour', 20, 9000), win('Weekly', 10, 302_400, WEEK)], { provider: 'openai', name: 'ChatGPT', plan: 'Plus' }),
@@ -532,12 +505,6 @@ test('expanded details survive re-renders, refreshes with reordered accounts and
   assert.equal(details.hidden, false);
   assert.ok(details.html.includes('<span class="k">Claude Max:</span> Weekly'), details.html);
   assert.ok(details.html.includes('<span class="k">Used:</span> 65%') && details.html.includes('<span class="k">Left:</span> 35%'), details.html);
-
-  // The Table view is unchanged, and switching back keeps the window open.
-  element('view').onclick();
-  assert.ok(!html().includes('Details') && !html().includes('class="win"'), html());
-  element('view').onclick();
-  assert.deepEqual(expanded(page), [false, false, false, true]);
 
   // A window that disappears is forgotten, so it comes back collapsed.
   claude.windows.pop();
@@ -581,8 +548,6 @@ test('the hover tooltip shows only for a fine pointer, never on focus or touch, 
   assert.ok(!shown(), 'leaving the page hides it');
   run('render()');
   assert.ok(!shown(), 'and a re-render does not bring it back');
-  run('tableView = true; render(); tableView = false; render();');
-  assert.ok(!shown(), 'the Table view has no windows');
   document.elementFromPoint = () => null;
 
   hover(0, 0, 'touch');
@@ -633,7 +598,7 @@ test('the meta line shows the running commit and warns in text when it is not cu
   const link = (sha) => `<a href="https://github.com/omertekin2002/ai-quota-dashboard/commit/${sha}" target="_blank" rel="noopener noreferrer"><code>${sha}</code></a>`;
 
   const current = await meta(base);
-  assert.ok(current.startsWith('Claude &amp; ChatGPT · updated '), current);
+  assert.ok(current.startsWith('Claude · ChatGPT · Antigravity · updated '), current);
   assert.ok(current.endsWith(` · running ${link('abc1234')}`), current);
   assert.ok(!current.includes('⚠'));
 
@@ -714,17 +679,17 @@ test('the Workspace panel shows the auto-update row in every state, with text wa
 const hang = (init) => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
 const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(setImmediate); };
 
-test('every page request is bounded: quotas at least 60 s, version 10 s, workspace and pipeline unchanged', async () => {
+test('every page request is bounded: quotas at least 105 s, version 10 s, workspace and pipeline unchanged', async () => {
   const requests = [];
   const { signals } = await loadDashboard({ respond: (url, init) => { requests.push([url.split('?')[0], init?.signal]); } });
   const bounds = requests.map(([url, signal]) => [url, signals.find((s) => s.controller.signal === signal)?.ms]);
-  assert.deepEqual(Object.fromEntries(bounds), { '/api/version': 10_000, '/api/quotas': 60_000, '/api/workspace': 12_000, '/api/pipeline': 100_000 });
+  assert.deepEqual(Object.fromEntries(bounds), { '/api/version': 10_000, '/api/quotas': 105_000, '/api/workspace': 12_000, '/api/pipeline': 100_000 });
   assert.equal(bounds.length, 4);
 });
 
 test('the quota timeout grows by 30 s per account in the last reading, since the server reads accounts one at a time', async () => {
   const many = (n) => quotasOf(...Array.from({ length: n }, (_, i) => account(`claude:${i}`, [win('5-hour', 10, 9000)])));
-  for (const [n, ms] of [[0, 60_000], [1, 60_000], [2, 75_000], [5, 165_000]]) {
+  for (const [n, ms] of [[0, 105_000], [1, 105_000], [2, 105_000], [5, 165_000]]) {
     const { run, signals } = await loadDashboard({ quotas: many(n), now: NOW });
     assert.equal(run('quotaTimeoutMs()'), ms, `${n} accounts`);
     const before = signals.length;
@@ -767,12 +732,12 @@ test('a hung quota request times out, keeps the last cards, stops claiming Live,
   run('load(true)'); // ignored while the hung request is in flight
   assert.equal(quotaRequests, 2);
 
-  expire(75_000); // two accounts: 15 s + 2 × 30 s
+  expire(105_000); // agy sets a 105 s minimum
   await clicked;
   assert.equal(element('refresh').disabled, false);
   assert.equal(run('loading'), false);
   const banner = element('banner').innerHTML;
-  assert.ok(banner.includes("The quota server didn't answer within 75 s. Showing the last reading."), banner);
+  assert.ok(banner.includes("The quota server didn't answer within 105 s. Showing the last reading."), banner);
   for (const raw of ['TimeoutError', 'AbortError', 'aborted', 'timed out']) assert.ok(!banner.includes(raw), `${raw} in ${banner}`);
   const [liveCard, staleCard] = cards();
   assert.ok(liveCard.includes('<span class="big">70%</span>'), liveCard);
@@ -781,9 +746,6 @@ test('a hung quota request times out, keeps the last cards, stops claiming Live,
   assert.equal(staleCard, staleBefore);
   assert.ok(element('meta').innerHTML.includes(`<span class="version-warn">⚠ Couldn't refresh</span>`), element('meta').innerHTML);
   assert.ok(element('meta').innerHTML.includes('running <a '), element('meta').innerHTML);
-  run('tableView = true; render();');
-  assert.ok(tableRowsOf(element('content').innerHTML)[0].includes(' (reading from 5m ago)</td>'), element('content').innerHTML);
-  run('tableView = false; render();');
 
   // Any other failure is still reported with its reason, and still isn't Live.
   mode = 'http500';
@@ -823,30 +785,30 @@ test('each quota timeout in a row doubles the next budget, up to 10 min, and a s
     await settle();
     assert.ok(page.element('banner').innerHTML.includes(`didn't answer within ${quotaBudget() / 1000} s`), page.element('banner').innerHTML);
   }
-  assert.deepEqual(budgets, [60_000, 120_000, 240_000, 480_000, 600_000, 600_000]);
+  assert.deepEqual(budgets, [105_000, 210_000, 420_000, 600_000, 600_000, 600_000]);
   hung = false;
   await page.run('load(true)');
   assert.equal(quotaBudget(), 600_000);
   assert.equal(page.element('banner').innerHTML, '');
-  assert.equal(page.run('quotaTimeoutMs()'), 60_000);
+  assert.equal(page.run('quotaTimeoutMs()'), 105_000);
   // After a success, the next timeout starts doubling from the base again.
   hung = true;
   page.run('load(true)');
   await settle();
-  page.expire(60_000);
+  page.expire(105_000);
   await settle();
-  assert.equal(page.run('quotaTimeoutMs()'), 120_000);
+  assert.equal(page.run('quotaTimeoutMs()'), 210_000);
 });
 
 test('a first quota load that times out shows the banner and leaves Refresh usable', async () => {
   let hung = true;
   const page = await loadDashboard({ now: NOW, respond: (url, init) => (url.startsWith('/api/quotas') && hung ? hang(init) : undefined) });
   assert.equal(page.element('refresh').disabled, true);
-  page.expire(60_000);
+  page.expire(105_000);
   await settle();
   assert.equal(page.element('refresh').disabled, false);
   const banner = page.element('banner').innerHTML;
-  assert.ok(banner.includes("The quota server didn't answer within 60 s. Is <code>node server.mjs</code> running?"), banner);
+  assert.ok(banner.includes("The quota server didn't answer within 105 s. Is <code>node server.mjs</code> running?"), banner);
   hung = false;
   await page.element('refresh').onclick();
   assert.equal(page.element('banner').innerHTML, '');
@@ -884,18 +846,18 @@ test('without AbortSignal.timeout (Safari before 16) every request still gets it
   const { element, run, timers } = page;
   assert.ok(element('content').innerHTML.includes('<span class="big">70%</span>'), element('content').innerHTML);
   assert.equal(run('workspaceError || pipelineError'), false);
-  assert.deepEqual(timers.map((t) => t.ms), [10_000, 60_000, 12_000, 100_000]); // version, quotas, workspace, pipeline
+  assert.deepEqual(timers.map((t) => t.ms), [10_000, 105_000, 12_000, 100_000]); // version, quotas, workspace, pipeline
 
   hung = true;
   const clicked = element('refresh').onclick();
   await settle();
   assert.equal(run('loading'), true);
   assert.equal(element('refresh').disabled, true);
-  timers.filter((t) => t.ms === 60_000).at(-1).fn();
+  timers.filter((t) => t.ms === 105_000).at(-1).fn();
   await clicked;
   assert.equal(run('loading'), false);
   assert.equal(element('refresh').disabled, false);
-  assert.ok(element('banner').innerHTML.includes("The quota server didn't answer within 60 s. Showing the last reading."), element('banner').innerHTML);
+  assert.ok(element('banner').innerHTML.includes("The quota server didn't answer within 105 s. Showing the last reading."), element('banner').innerHTML);
 });
 
 test('a live window past its reset reloads after 20 s, but not again while loads fail: the 2-minute poll retries then', async () => {
@@ -1137,4 +1099,34 @@ test('At a glance adds no requests: load, every timer and Refresh fetch the same
   assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas?force', '/api/workspace?force', '/api/pipeline?force'], 'Refresh');
   assert.equal(page.timers.length, 0, 'no new timers either');
   assert.ok(!/fetch\(/.test(html.slice(html.indexOf('// ---------- At a glance'), html.indexOf('async function refreshAll'))), 'the tile code fetches nothing');
+});
+
+test('Antigravity cards render shared quotas, disabled/unknown buckets and expired resets without inventing usage', async () => {
+  const windows = antigravityWindows({ status: 'SUCCESS', command: { name: 'usage', data: { groups: [
+    { name: 'Gemini Models', buckets: [
+      { id: 'week', window: 'weekly', remaining_fraction: 0.25, reset_time: new Date(NOW + 302_400_000).toISOString() },
+      { id: '5h', window: '5h', remaining_fraction: 0.9, disabled: true },
+      { id: 'future', window: 'constructor', name: '<Custom allowance>', remaining_fraction: 1 },
+      { id: 'unknown', window: 'weekly' },
+      { id: 'passed', window: 'weekly', remaining_fraction: 0.2, reset_time: new Date(NOW - 1000).toISOString() },
+    ] },
+  ] } } });
+  const page = await renderQuotas(quotasOf(account('antigravity:local', windows, {
+    provider: 'antigravity', name: 'Antigravity', plan: null, email: null, sources: ['agy CLI'],
+  })));
+  assert.ok(page.cards.includes('mono antigravity'));
+  assert.ok(page.cards.includes('Local agy account'));
+  const [weekly, disabled, future, unknown, passed] = winsOf(page.cards);
+  assert.ok(weekly.includes('Gemini Models · Weekly') && weekly.includes('<span class="big">25%</span>'));
+  assert.ok(weekly.includes('⚠ Low') && weekly.includes('At this pace'));
+  assert.ok(disabled.includes('Quota disabled') && disabled.includes('Quota unavailable'));
+  for (const w of [disabled, unknown, passed]) {
+    assert.ok(w.includes('<span class="big">—</span>'), w);
+    assert.ok(!w.includes('class="fill"') && !w.includes('class="status'), w);
+  }
+  assert.ok(future.includes('&lt;Custom allowance&gt;') && future.includes('Reset time unavailable'));
+  assert.ok(!future.includes('class="pace"') && !future.includes('billing cycle'));
+  assert.ok(passed.includes('reset since last reading') && !passed.includes('100%'));
+  page.click(page.winEl(0, 0));
+  assert.ok(page.element('content').innerHTML.includes('<span class="k">Used:</span> 75%'));
 });
