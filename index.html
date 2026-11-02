@@ -248,6 +248,30 @@
     .attention-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   }
 
+  .overview { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr); gap: 16px; margin-bottom: 24px; }
+  .glance { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; font-size: 13px; }
+  .glance h2 { margin: 0 0 8px; font-size: 13px; font-weight: 650; color: var(--ink-2); }
+  .glance h2 a { color: inherit; text-decoration: none; }
+  .glance h2 a:hover, .glance h2 a:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
+  .glance p { margin: 0; }
+  .glance-lead { font-weight: 600; }
+  .glance-detail { color: var(--ink-2); margin-top: 3px; overflow-wrap: anywhere; }
+  .glance-note { color: var(--ink-muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+  .glance-list { list-style: none; margin: 0; padding: 0; }
+  .glance-row { padding: 6px 0; border-top: 1px solid var(--hairline); min-width: 0; }
+  .glance-row:first-child { border-top: 0; padding-top: 0; }
+  .glance-who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-muted); font-size: 12px; }
+  .glance-who strong { color: var(--ink-1); font-weight: 600; }
+  .glance-what { color: var(--ink-2); overflow-wrap: anywhere; }
+  .glance-what strong { color: var(--ink-1); font-variant-numeric: tabular-nums; }
+  .glance-what span { white-space: nowrap; }
+  .glance .healthy { color: var(--healthy); }
+  .glance .warning { color: var(--warning-ink); }
+  .glance .critical { color: var(--critical-ink); }
+  @media (max-width: 700px) {
+    .overview { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  }
+
   .legend { margin-top: 20px; color: var(--ink-muted); font-size: 12px; display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
   .legend .key { display: inline-flex; align-items: center; gap: 6px; }
   .legend .swatch { width: 18px; height: 6px; border-radius: 3px; background: var(--fill); }
@@ -272,7 +296,12 @@
       <button id="refresh">Refresh</button>
     </div>
   </div>
-  <section class="workspace" aria-labelledby="workspace-title">
+  <section class="overview" id="overview" aria-label="At a glance">
+    <div class="glance"><h2><a href="#content">Capacity</a></h2><div id="glance-capacity"><p class="glance-note">Loading…</p></div></div>
+    <div class="glance"><h2><a href="#pipeline">Needs you</a></h2><div id="glance-attention"><p class="glance-note">Loading…</p></div></div>
+    <div class="glance"><h2><a href="#workspace">Workspace</a></h2><div id="glance-workspace"><p class="glance-note">Checking…</p></div></div>
+  </section>
+  <section class="workspace" id="workspace" aria-labelledby="workspace-title">
     <div class="workspace-head">
       <h2 id="workspace-title">Workspace computer</h2>
       <div class="workspace-meta" id="workspace-meta">Checking laptop…</div>
@@ -355,8 +384,74 @@
     </div>`;
   }
 
+  // ---------- workspace levels: one set of rules for the panels and the At a glance tile ----------
+  // Each returns 'critical', 'warning', 'healthy' or '' (nothing to say).
+  const SERVICE_STATES = { running: 'Running', stopped: 'Stopped', failed: 'Failed', 'not-found': 'Not installed', unknown: 'Unknown', activating: 'Starting', deactivating: 'Stopping', reloading: 'Reloading', exited: 'Exited' };
+  const MEMORY_LABELS = { healthy: 'Memory has headroom', warning: 'Memory needs attention', critical: 'Memory under pressure', unknown: 'Memory pressure unavailable' };
+  const INTERNET_CONDITIONS = { limited: 'Internet limited', portal: 'Network sign-in needed', offline: 'Internet offline', unknown: 'Internet status unknown' };
+  const healthChecksOf = (ws, s) => (ws.diagnostics?.healthChecks || []).filter((c) => c.service === s.unit);
+  const checkLevel = (c) => (c.state === 'healthy' ? 'healthy' : c.state === 'unhealthy' ? 'critical' : 'warning');
+  const serviceLevel = (s, checks) => (checks.some((c) => c.state === 'unhealthy') ? 'critical'
+    : s.state === 'running' ? 'healthy' : ['failed', 'stopped'].includes(s.state) ? 'critical' : 'warning');
+  const batteryOf = (ws) => ws.power?.batteries?.[0];
+  function batteryLevel(ws) {
+    const battery = batteryOf(ws);
+    const onBattery = ws.power?.acOnline === false || battery?.status === 'Discharging';
+    return onBattery && battery?.percent != null ? (battery.percent <= 10 ? 'critical' : battery.percent <= 30 ? 'warning' : '') : '';
+  }
+  const sensorOf = (ws) => (ws.temperatures || []).find((s) => s.name === 'CPU') || ws.temperatures?.[0];
+  const tempLevel = (sensor) => (sensor?.criticalCelsius != null
+    ? (sensor.celsius >= sensor.criticalCelsius ? 'critical' : sensor.celsius >= sensor.criticalCelsius - 10 ? 'warning' : '') : '');
+  const memoryLevelOf = (ws) => (['warning', 'critical'].includes(ws.diagnostics?.memoryLevel) ? ws.diagnostics.memoryLevel : '');
+  const internetLevel = (net) => (net?.state === 'online' ? 'healthy' : net?.state === 'offline' ? 'critical' : 'warning');
+  const diskLevel = (disk) => (disk.mounted === false || disk.readOnly || disk.usedPct >= 95 ? 'critical' : disk.usedPct >= 90 ? 'warning' : '');
+  function backupStatus(backup) {
+    const old = Boolean(backup.lastSuccessAt && Date.now() - backup.lastSuccessAt > 36 * 3600_000);
+    const level = backup.state === 'failed' ? 'critical' : old || backup.scheduleActive === false ? 'warning' : backup.state === 'success' ? 'healthy' : '';
+    return { old, level };
+  }
+  // The update timer only counts as stopped once the updater is installed and readable.
+  const autoUpdateStatus = (u) => ({ failed: u.state === 'failed', timerStopped: !['not-installed', 'unknown'].includes(u.state) && u.timerActive === false });
+
+  // Every workspace reading that needs attention, critical first, from the same rules the panels color by.
+  function workspaceConditions(ws) {
+    if (!ws?.supported) return [];
+    const out = [];
+    const add = (level, text) => { if (level === 'critical' || level === 'warning') out.push({ level, text }); };
+    for (const s of ws.services || []) {
+      const checks = healthChecksOf(ws, s);
+      const level = serviceLevel(s, checks);
+      add(level, s.state === 'running' ? `${s.name} check failed` : `${s.name} ${s.state === 'unknown' ? 'state unknown' : String(SERVICE_STATES[s.state] || s.state).toLowerCase()}`);
+      for (const c of checks) if (checkLevel(c) === 'warning') add('warning', `${s.name} ${c.label}: ${c.detail || 'unknown'}`);
+    }
+    const memory = memoryLevelOf(ws);
+    add(memory, MEMORY_LABELS[memory]);
+    if (ws.internet) add(internetLevel(ws.internet), INTERNET_CONDITIONS[ws.internet.state] || INTERNET_CONDITIONS.unknown);
+    const battery = batteryOf(ws);
+    add(batteryLevel(ws), `Battery ${Math.round(battery?.percent)}% on battery power`);
+    const sensor = sensorOf(ws);
+    add(tempLevel(sensor), `${sensor?.name} at ${Math.round(sensor?.celsius)}°C`);
+    for (const disk of ws.diagnostics?.disks || []) {
+      add(diskLevel(disk), disk.mounted === false ? `${disk.name} not mounted` : disk.readOnly ? `${disk.name} read-only` : `${disk.name} ${disk.usedPct}% full`);
+    }
+    const backup = ws.diagnostics?.backup;
+    if (backup) {
+      const { old, level } = backupStatus(backup);
+      add(level, backup.state === 'failed' ? 'T7 backup failed' : old ? 'No successful T7 backup in 36h' : 'T7 backup schedule inactive');
+    }
+    if (ws.autoUpdate) {
+      const { failed, timerStopped } = autoUpdateStatus(ws.autoUpdate);
+      if (failed) add('warning', 'Auto-update failed');
+      if (timerStopped) add('warning', 'Auto-update timer stopped');
+    }
+    return [...out.filter((c) => c.level === 'critical'), ...out.filter((c) => c.level === 'warning')];
+  }
+
+  const workspaceStale = () => workspaceError || (workspace != null && Date.now() - workspace.generatedAt > 90_000);
+
   function renderWorkspace() {
-    const stale = workspaceError || (workspace && Date.now() - workspace.generatedAt > 90_000);
+    renderWorkspaceGlance();
+    const stale = workspaceStale();
     $('workspace-error').hidden = !stale;
     $('workspace-error').className = 'workspace-note warning';
     $('workspace-error').textContent = workspaceError
@@ -376,42 +471,36 @@
       return;
     }
     $('workspace-meta').textContent = `${workspace.model} · up ${fmtDur(workspace.uptimeSec)} · checked ${ago(workspace.generatedAt)}`;
-    const battery = workspace.power.batteries[0];
+    const battery = batteryOf(workspace);
     const ac = workspace.power.acOnline;
-    const onBattery = ac === false || battery?.status === 'Discharging';
     const powerDetail = [ac === true ? 'Plugged in' : ac === false ? 'On battery' : 'Power source unknown', battery?.status].filter(Boolean).join(' · ');
-    const batteryLevel = onBattery && battery?.percent != null ? (battery.percent <= 10 ? 'critical' : battery.percent <= 30 ? 'warning' : '') : '';
-    const sensor = workspace.temperatures.find((s) => s.name === 'CPU') || workspace.temperatures[0];
-    const tempLevel = sensor?.criticalCelsius != null
-      ? (sensor.celsius >= sensor.criticalCelsius ? 'critical' : sensor.celsius >= sensor.criticalCelsius - 10 ? 'warning' : '') : '';
+    const sensor = sensorOf(workspace);
     const tempDetail = sensor
       ? [sensor.name, ...workspace.temperatures.filter((s) => s !== sensor).map((s) => `${s.name} ${Math.round(s.celsius)}°C`)].join(' · ')
       : 'No readable temperature sensors';
     const memory = workspace.memory;
-    const memoryLevel = ['warning', 'critical'].includes(workspace.diagnostics?.memoryLevel) ? workspace.diagnostics.memoryLevel : '';
     const net = workspace.internet;
     const netLabels = { online: 'Online', limited: 'Limited', portal: 'Sign-in needed', offline: 'Offline', unknown: 'Unknown' };
     const netDetails = { online: `Internet reachable · ${net.latencyMs} ms`, limited: 'HTTPS checks failed; network connected', portal: 'Network sign-in may be required', offline: 'No internet connection detected', unknown: 'Could not verify internet access' };
     const networkName = net.networkName ? `${net.networkType === 'wifi' ? 'Wi-Fi' : 'Ethernet'}: ${net.networkName}` : '';
     const internetDetail = [networkName, net.signalPct != null ? `${net.signalPct}% signal` : '', netDetails[net.state] || netDetails.unknown].filter(Boolean).join(' · ');
     const metrics = [
-      machineMetric('Battery', battery?.percent != null ? `${Math.round(battery.percent)}%` : '—', battery ? powerDetail : 'No readable battery', batteryLevel, battery?.percent),
-      machineMetric('Temperature', sensor ? `${Math.round(sensor.celsius)}°C` : '—', tempDetail, tempLevel),
-      machineMetric('Memory', memory ? `${Math.round(memory.usedPct)}%` : '—', memory ? `${gib(memory.usedBytes)} / ${gib(memory.totalBytes)} used${memory.swapUsedBytes != null ? ` · ${gib(memory.swapUsedBytes)} swap` : ''}` : 'Memory reading unavailable', memoryLevel, memory?.usedPct),
-      machineMetric('Internet', netLabels[net.state] || 'Unknown', internetDetail, net.state === 'online' ? 'healthy' : net.state === 'offline' ? 'critical' : 'warning'),
+      machineMetric('Battery', battery?.percent != null ? `${Math.round(battery.percent)}%` : '—', battery ? powerDetail : 'No readable battery', batteryLevel(workspace), battery?.percent),
+      machineMetric('Temperature', sensor ? `${Math.round(sensor.celsius)}°C` : '—', tempDetail, tempLevel(sensor)),
+      machineMetric('Memory', memory ? `${Math.round(memory.usedPct)}%` : '—', memory ? `${gib(memory.usedBytes)} / ${gib(memory.totalBytes)} used${memory.swapUsedBytes != null ? ` · ${gib(memory.swapUsedBytes)} swap` : ''}` : 'Memory reading unavailable', memoryLevelOf(workspace), memory?.usedPct),
+      machineMetric('Internet', netLabels[net.state] || 'Unknown', internetDetail, internetLevel(net)),
     ];
-    const stateLabels = { running: 'Running', stopped: 'Stopped', failed: 'Failed', 'not-found': 'Not installed', unknown: 'Unknown', activating: 'Starting', deactivating: 'Stopping', reloading: 'Reloading', exited: 'Exited' };
     const services = workspace.services.map((s) => {
-      const serviceChecks = (workspace.diagnostics?.healthChecks || []).filter((c) => c.service === s.unit);
+      const serviceChecks = healthChecksOf(workspace, s);
       const failedCheck = serviceChecks.some((c) => c.state === 'unhealthy');
-      const level = failedCheck ? 'critical' : s.state === 'running' ? 'healthy' : ['failed', 'stopped'].includes(s.state) ? 'critical' : 'warning';
+      const level = serviceLevel(s, serviceChecks);
       const checks = serviceChecks.map((c) => {
-        const state = c.state === 'healthy' ? 'healthy' : c.state === 'unhealthy' ? 'critical' : 'warning';
+        const state = checkLevel(c);
         const detail = c.state === 'healthy' ? `OK${c.latencyMs != null ? ` · ${c.latencyMs} ms` : ''}` : c.detail;
         return `<div class="health-check ${state}" title="${esc(`Checked ${ago(c.checkedAt)}`)}">${esc(c.label)}: ${esc(detail)}${c.id === 'ngrok-public' ? ` · ${esc(ago(c.checkedAt))}` : ''}</div>`;
       }).join('');
       const restarts = s.automaticRestarts != null ? `<div class="service-meta">${s.automaticRestarts} auto restarts${s.startedAt ? ` · up ${esc(fmtDur((Date.now() - s.startedAt) / 1000))}` : ''}</div>` : '';
-      return `<li><div class="service-name">${esc(s.name)}</div><div class="service-state ${level}"><span class="health-dot" aria-hidden="true"></span>${esc(stateLabels[s.state] || s.state)}${failedCheck && s.state === 'running' ? ' · Check failed' : ''}</div>${checks}${restarts}</li>`;
+      return `<li><div class="service-name">${esc(s.name)}</div><div class="service-state ${level}"><span class="health-dot" aria-hidden="true"></span>${esc(SERVICE_STATES[s.state] || s.state)}${failedCheck && s.state === 'running' ? ' · Check failed' : ''}</div>${checks}${restarts}</li>`;
     }).join('');
     $('workspace-content').innerHTML = `<div class="machine-metrics">${metrics.join('')}</div><ul class="services" aria-label="Services">${services}</ul>${renderAutoUpdate(workspace.autoUpdate)}`;
     renderDiagnostics();
@@ -430,7 +519,7 @@
       running: `running now${last ? ` · ${last}` : ''}`,
       'never-run': 'no completed run recorded',
     }[u.state] || 'status unavailable';
-    const timer = u.timerActive === false ? '<span class="warning">⚠ timer stopped, so updates no longer run</span>'
+    const timer = autoUpdateStatus(u).timerStopped ? '<span class="warning">⚠ timer stopped, so updates no longer run</span>'
       : u.nextRunAt ? `next ${esc(fmtClock(u.nextRunAt))}` : '';
     const hint = u.state === 'failed' ? `see ${md('`journalctl --user -u ai-quota-dashboard-update`')}` : '';
     return row([result, timer, hint]);
@@ -466,22 +555,20 @@
     target.hidden = !workspace?.supported || !d;
     if (target.hidden) return;
     const history = workspace.history;
-    const pressureLabels = { healthy: 'Memory has headroom', warning: 'Memory needs attention', critical: 'Memory under pressure', unknown: 'Memory pressure unavailable' };
     const pressure = ['cpu', 'memory', 'io'].map((name) => {
       const value = d.pressure[name]?.some?.avg10;
       return `<div><span>${{ cpu: 'CPU wait', memory: 'Memory stalls', io: 'I/O wait' }[name]}</span><strong>${value != null ? `${value.toFixed(1)}%` : '—'}</strong></div>`;
     }).join('');
     const processes = d.topProcesses.map((p) => `<li class="process-row"><span class="process-name">${esc(p.name)} <span class="workspace-meta">#${p.pid}</span></span><span class="process-memory">${esc(mib(p.rssBytes))}</span></li>`).join('');
     const disks = d.disks.map((disk) => {
-      const level = disk.mounted === false || disk.readOnly || disk.usedPct >= 95 ? 'critical' : disk.usedPct >= 90 ? 'warning' : '';
+      const level = diskLevel(disk);
       const detail = disk.mounted === false ? 'Not mounted' : disk.mounted == null ? 'Mount status unavailable'
         : `${disk.freeBytes == null ? 'Space reading unavailable' : `${gib(disk.freeBytes)} free of ${gib(disk.totalBytes)}`}${disk.readOnly ? ' · Read-only' : ''}`;
       return `<div class="disk"><div class="diagnostic-row"><span>${esc(disk.name)}</span><span class="diagnostic-status ${level}">${disk.usedPct != null ? `${disk.usedPct}% used` : '—'}</span></div>
         <div class="diagnostic-detail">${esc(disk.path)} · ${esc(detail)}</div>${disk.usedPct != null ? `<div class="meter ${level}" aria-hidden="true"><div class="fill" style="width:${disk.usedPct}%"></div></div>` : ''}</div>`;
     }).join('');
     const backup = d.backup;
-    const oldBackup = backup.lastSuccessAt && Date.now() - backup.lastSuccessAt > 36 * 3600_000;
-    const backupLevel = backup.state === 'failed' ? 'critical' : oldBackup || backup.scheduleActive === false ? 'warning' : backup.state === 'success' ? 'healthy' : '';
+    const { old: oldBackup, level: backupLevel } = backupStatus(backup);
     const backupLabel = oldBackup && backup.state === 'success' ? 'No successful backup in 36h'
       : { success: 'Last run succeeded', failed: 'Last run failed', running: 'Backup running', 'never-run': 'No completed run recorded', unknown: 'Status unavailable' }[backup.state] || 'Status unavailable';
     const backupDetail = [backup.lastSuccessAt ? `Last success ${fmtFull(backup.lastSuccessAt)}` : 'Last success unknown',
@@ -490,7 +577,7 @@
     const tailscale = d.tailscale.state === 'running' ? routes || 'Connected · no active peer traffic' : d.tailscale.state === 'offline' ? 'Not connected' : 'Status unavailable';
     const events = (history?.events || []).slice(0, 10).map((e) => `<li class="event-row ${e.level === 'critical' ? 'critical' : e.level === 'warning' ? 'warning' : ''}"><span class="health-dot" aria-hidden="true"></span><div class="event-title">${esc(e.title)}<time class="event-time" datetime="${new Date(e.timestamp).toISOString()}">${esc(fmtFull(e.timestamp))} · ${esc(ago(e.timestamp))}</time></div></li>`).join('');
     target.innerHTML = `<h2 class="diagnostics-heading">Computer diagnostics</h2><div class="diagnostics-grid">${d.agentWorkflow ? renderAgentWorkflow(d.agentWorkflow) : ''}
-      <article class="diagnostic-card"><h3>Memory & processes</h3><div class="diagnostic-status ${d.memoryLevel === 'critical' ? 'critical' : d.memoryLevel === 'warning' ? 'warning' : ''}">${esc(pressureLabels[d.memoryLevel] || pressureLabels.unknown)}</div>
+      <article class="diagnostic-card"><h3>Memory & processes</h3><div class="diagnostic-status ${memoryLevelOf(workspace)}">${esc(MEMORY_LABELS[d.memoryLevel] || MEMORY_LABELS.unknown)}</div>
         <div class="pressure-readings">${pressure}</div><p class="diagnostic-detail">Time tasks spent waiting during the last 10 seconds. Top five processes by resident memory:</p><ul class="diagnostic-list">${processes || '<li class="diagnostic-detail">Process readings unavailable</li>'}</ul></article>
       <article class="diagnostic-card"><h3>Storage & backup</h3>${disks}<div class="diagnostic-row"><span>T7 backup</span><span class="diagnostic-status ${backupLevel}">${esc(backupLabel)}</span></div><p class="diagnostic-detail">${esc(backupDetail)}</p></article>
       <article class="diagnostic-card"><h3>Connection quality</h3><div class="diagnostic-row"><span>Wi-Fi signal</span><span>${workspace.internet.signalPct != null ? `${workspace.internet.signalPct}%` : '—'}</span></div>
@@ -570,12 +657,13 @@
   // Links only ever point at GitHub; `html` is already escaped.
   const ghLink = (url, html) => /^https:\/\/github\.com\//.test(url || '') ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${html}</a>` : html;
   const badge = (text, level = '') => `<span class="badge ${level}">${esc(text)}</span>`;
+  // `count` is the [singular, plural] noun the At a glance tile counts each kind with.
   const ATTENTION = {
-    'needs-human': { label: 'Blocked', group: 'Blocked until you act', level: 'critical' },
-    'local-checkout': { label: 'Checkout', group: 'Local checkouts out of sync', level: 'critical' },
-    decision: { label: 'Decide', group: 'Decisions to answer', level: 'warning' },
-    umbrella: { label: 'Merge', group: 'Umbrella PRs ready to review and merge', level: '' },
-    review: { label: 'Review', group: 'Agent PRs waiting for your review', level: '' },
+    'needs-human': { label: 'Blocked', group: 'Blocked until you act', level: 'critical', count: ['blocked', 'blocked'] },
+    'local-checkout': { label: 'Checkout', group: 'Local checkouts out of sync', level: 'critical', count: ['checkout out of sync', 'checkouts out of sync'] },
+    decision: { label: 'Decide', group: 'Decisions to answer', level: 'warning', count: ['decision', 'decisions'] },
+    umbrella: { label: 'Merge', group: 'Umbrella PRs ready to review and merge', level: '', count: ['umbrella to merge', 'umbrellas to merge'] },
+    review: { label: 'Review', group: 'Agent PRs waiting for your review', level: '', count: ['PR to review', 'PRs to review'] },
   };
 
   function attentionRow(a, withRepo = true) {
@@ -680,6 +768,7 @@
   }
 
   function renderPipeline() {
+    renderAttentionGlance();
     const p = pipeline, o = p?.overview;
     if (!p || !o) {
       $('pipeline-meta').textContent = pipelineError || p ? 'Unavailable' : 'Loading…';
@@ -737,6 +826,82 @@
     const slug = e.target?.dataset?.slug;
     if (slug) pipelineOpen.set(slug, e.target.open);
   }, true);
+
+  // ---------- At a glance: capacity, what needs you and workspace condition, from the readings already loaded ----------
+  const ICON = { critical: '⛔', warning: '⚠', healthy: '✓' };
+  const glanceNote = (text, level = '') => `<p class="glance-note ${level}">${esc(text)}</p>`;
+  // A reading shown after a failed update, or one too old to trust, says how old it is.
+  const glanceAge = (at, failed) => glanceNote(`${failed ? "⚠ Couldn't refresh · " : ''}◷ ${at != null ? ago(at) : 'time unknown'}`, 'warning');
+
+  // One line per account: its tightest known window. Accounts are never summed or compared with each other.
+  function renderCapacityGlance() {
+    const now = Date.now();
+    const failed = quotaError ? glanceNote("⚠ Couldn't refresh", 'warning') : '';
+    if (!data) {
+      $('glance-capacity').innerHTML = failed || glanceNote('Loading…');
+      return;
+    }
+    const rows = data.accounts.map((a) => {
+      const known = (a.windows || []).map((w) => ({ w, v: view(w, now) })).filter(({ v }) => !v.unknown);
+      const tight = known.reduce((min, x) => (!min || x.v.left < min.v.left ? x : min), null);
+      let what;
+      if (!tight) what = `<strong>—</strong> ${a.windows?.length ? 'Usage unknown' : a.error ? "Couldn't read usage" : 'No limits reported'}`;
+      else {
+        const { w, v } = tight, st = statusLabel(v);
+        const when = v.resetPassed ? footText(v, a.stale).text : v.notStarted || v.toReset == null ? resetText(w, v) : `resets in ${fmtDur(v.toReset)}`;
+        what = `${esc(w.label)} <strong>${pctText(v.left)}</strong> left${when ? ` · ${esc(when)}` : ''}${st ? ` <span class="${st.cls}">${st.text}</span>` : ''}`;
+      }
+      // The same reading age the card shows instead of ● Live.
+      const age = a.stale ? a.fetchedAt : quotaError && !a.error ? readingAt(a) : null;
+      return `<li class="glance-row"><div class="glance-who"><strong>${esc(a.name)}${a.plan ? ` ${esc(a.plan)}` : ''}</strong>${a.email ? ` · ${esc(a.email)}` : ''}</div>
+        <div class="glance-what">${what}${age != null ? ` <span class="warning">◷ ${esc(ago(age))}</span>` : ''}</div></li>`;
+    });
+    $('glance-capacity').innerHTML = rows.length ? `<ul class="glance-list">${rows.join('')}</ul>${failed}` : `${glanceNote('No Claude or ChatGPT logins found')}${failed}`;
+  }
+
+  // build-workflow's own attention list, counted by its own kinds: no re-ranking and no new categories.
+  function renderAttentionGlance() {
+    const p = pipeline, o = p?.overview;
+    if (!p || !o) {
+      $('glance-attention').innerHTML = pipelineError || p ? glanceNote('Pipeline unavailable', 'warning') : glanceNote('Loading…');
+      return;
+    }
+    const attention = Array.isArray(o.attention) ? o.attention : [];
+    const kinds = Object.entries(ATTENTION).map(([kind, meta]) => [meta, attention.filter((a) => a.kind === kind).length]).filter(([, n]) => n);
+    const other = attention.filter((a) => !ATTENTION[a.kind]).length;
+    const urgent = attention.filter((a) => a.urgent).length;
+    const parts = [...kinds.map(([meta, n]) => plural(n, ...meta.count)), other ? `${other} other` : '', urgent ? `🔥 ${urgent} urgent` : ''].filter(Boolean);
+    const level = kinds.some(([meta]) => meta.level === 'critical') ? 'critical' : kinds.some(([meta]) => meta.level === 'warning') ? 'warning' : '';
+    const summary = attention.length
+      ? `<p class="glance-lead ${level}">${urgent ? '🔥 ' : ''}${plural(attention.length, 'item needs you', 'items need you')}</p><p class="glance-detail">${esc(parts.join(' · '))}</p>`
+      : `<p class="glance-lead healthy">${ICON.healthy} Nothing needs you</p>`;
+    const notes = [
+      pipelineError || p.error ? glanceAge(p.fetchedAt, true) : '',
+      o.github && !o.github.available ? glanceNote('⚠ GitHub unavailable: only local items are current', 'warning') : '',
+    ];
+    $('glance-attention').innerHTML = summary + notes.join('');
+  }
+
+  function renderWorkspaceGlance() {
+    const target = $('glance-workspace');
+    if (!workspace) {
+      target.innerHTML = workspaceError ? glanceNote('Unavailable', 'warning') : glanceNote('Checking…');
+      return;
+    }
+    if (!workspace.supported) {
+      target.innerHTML = glanceNote('Monitoring is available on Linux');
+      return;
+    }
+    const conditions = workspaceConditions(workspace);
+    const critical = conditions.filter((c) => c.level === 'critical').length, warnings = conditions.length - critical;
+    const named = conditions.slice(0, 2).map((c) => `<span class="${c.level}">${ICON[c.level]} ${esc(c.text)}</span>`);
+    if (conditions.length > 2) named.push(`+${conditions.length - 2} more`);
+    const summary = conditions.length
+      ? `<p class="glance-lead ${critical ? 'critical' : 'warning'}">${[critical ? `${ICON.critical} ${critical} critical` : '', warnings ? `${ICON.warning} ${plural(warnings, 'warning')}` : ''].filter(Boolean).join(' · ')}</p>
+        <p class="glance-detail">${named.join(' · ')}</p>`
+      : `<p class="glance-lead healthy">${ICON.healthy} All OK</p>`;
+    target.innerHTML = summary + (workspaceStale() ? glanceAge(workspace.generatedAt, workspaceError) : '');
+  }
 
   async function refreshAll(force = false) {
     $('refresh').disabled = true;
@@ -912,6 +1077,7 @@
 
   // `tick` is the 15-second clock update, as opposed to a render for new data or a toggle.
   function render(tick = false) {
+    renderCapacityGlance();
     if (!data) return;
     const now = Date.now();
     const live = new Set(data.accounts.flatMap((a) => (a.windows || []).map((w) => windowKey(a, w))));
