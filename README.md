@@ -1,6 +1,6 @@
 # ai-quota-dashboard
 
-A local dashboard showing how much of your **5-hour** and **weekly** limits is left on Claude, ChatGPT (Codex), and Antigravity subscriptions.
+A local dashboard showing how much of your **5-hour** and **weekly** limits is left on Claude and ChatGPT (Codex) subscriptions.
 
 No dependencies, no build step. Needs Node 18+.
 
@@ -27,9 +27,9 @@ For each account and limit window, including model-specific ones such as Claude'
 - a pace projection: how much will be left at the reset if you keep the current rate
 - a tick on the meter marking how much of the window's time is left. If the bar ends left of the tick, you're using the quota faster than it refills.
 
-Tap or click a window, or focus it and press Enter or Space, to show its exact numbers inline (left and used %, window length, share of the weekly limit, reset time, time left and reading age). Do the same again, or press Escape, to hide them. Each window opens on its own, and stays open through automatic and manual refreshes, even when accounts change order. With a mouse or trackpad, hovering a window also previews the same numbers in a tooltip. The page updates every 2 minutes, and the tab title shows the tightest window per account.
+Tap or click a window, or focus it and press Enter or Space, to show its exact numbers inline (left and used %, window length, share of the weekly limit, reset time, time left and reading age). Do the same again, or press Escape, to hide them. Each window opens on its own, and stays open through automatic and manual refreshes and the **Table** view, even when accounts change order. With a mouse or trackpad, hovering a window also previews the same numbers in a tooltip. The **Table** button shows everything as a table. The page updates every 2 minutes, and the tab title shows the tightest window per account.
 
-Every request the page makes has a timeout: for quotas, 30 seconds per account in the last reading plus 15 seconds, and at least 105 seconds (covering Antigravity’s 5-second version check and 90-second usage report). The server reads accounts one after another, and each can take a 15-second profile lookup plus a 15-second usage request, so this covers a slow but healthy collection. Each timeout in a row doubles the next one, up to 10 minutes, so a collection bigger than the page expects still gets through. The other timeouts are 10 seconds for the version, 12 seconds for the computer panel and 100 seconds for the pipeline. A stalled server can't leave **Refresh** stuck: after a timeout the banner says so, the last cards stay on screen and the next refresh tries again. While the last quota load has failed, no card claims **● Live**. Each shows its reading's age (◷) instead, and the line under **Quotas** says ⚠ Couldn't refresh until a load succeeds.
+Every request the page makes has a timeout: for quotas, 30 seconds per account in the last reading plus 15 seconds, and at least 60 seconds. The server reads accounts one after another, and each can take a 15-second profile lookup plus a 15-second usage request, so this covers a slow but healthy collection. Each timeout in a row doubles the next one, up to 10 minutes, so a collection bigger than the page expects still gets through. The other timeouts are 10 seconds for the version, 12 seconds for the computer panel and 100 seconds for the pipeline. A stalled server can't leave **Refresh** stuck: after a timeout the banner says so, the last cards stay on screen and the next refresh tries again. While the last quota load has failed, no card claims **● Live**. Each shows its reading's age (◷) instead, and the line under **Quotas** says ⚠ Couldn't refresh until a load succeeds.
 
 The line under **Quotas** also shows which commit the server is running, linked on GitHub. It adds a text warning when that isn't the latest code:
 
@@ -107,21 +107,10 @@ Accounts are discovered automatically. When the same account appears in several 
 |---|---|
 | Claude | macOS Keychain item `Claude Code-credentials`, `~/.claude/.credentials.json`, CLIProxyAPI `claude-*.json` |
 | ChatGPT / Codex | `~/.codex/auth.json`, CLIProxyAPI `codex-*.json` |
-| Antigravity | The current signed-in `agy` CLI account, or T3 Code’s signed-in Antigravity runtime |
 
 CLIProxyAPI is optional. The dashboard only reads its auth folder (`~/.cli-proxy-api`, the one VibeProxy uses). When the proxy is running, it keeps those tokens fresh.
 
 Usage numbers come from `api.anthropic.com/api/oauth/usage` and `chatgpt.com/backend-api/wham/usage`. These are the same endpoints the Claude Code and Codex apps call. They're unofficial and may change.
-
-### Antigravity (`agy`)
-
-Install Antigravity CLI **1.1.11 or later** and sign in with `agy`, or sign in to Antigravity in T3 Code, on the machine running the dashboard. The collector looks for `agy` first — on the server’s `PATH`, in `~/.local/bin`, `/usr/local/bin`, or `/opt/homebrew/bin` — and otherwise falls back to T3 Code’s managed runtime under `~/.t3/tools/antigravity-acp` (overridable via `T3CODE_HOME`). For a service with a different PATH, set `ANTIGRAVITY_CLI_PATH` to the CLI executable’s absolute path. An explicit missing path produces a setup error; an absent CLI/runtime with no previous reading is omitted.
-
-With the standalone CLI, the dashboard runs `agy -p /usage --output-format json --print-timeout 90s` after verifying its version. With T3 Code’s runtime (`agy_acp_server.par`), which has no print mode, it opens a one-turn ACP session over stdio and sends `/usage`; the ACP server intercepts `/usage` itself and replies with Markdown built from the same quota groups and buckets. Neither path starts a model turn or consumes model quota. Each uses the existing login and handles its own authentication/refresh; the T3 runtime runs against a throwaway `GEMINI_HOME` with symlinked login files so T3 Code’s own sessions and credentials are never written. The report does not identify the account or plan, so the card says **Local agy account** or **T3 Code agy account**; it does not combine multiple Google logins.
-
-Each reported group (Gemini, Claude/GPT, or a separate model allowance) gets its own quota windows. Only explicit `5h` and `weekly` cadences get pace projections. Missing/out-of-range fractions remain unknown, disabled buckets show **Quota disabled**, and missing resets are not guessed. A passed reset waits for fresh data rather than assuming 100% remaining. Cached failures are marked stale; a retained report belongs to the CLI login used at its capture time, which can differ after switching logins.
-
-Checks run in a temporary private working directory with auto-update disabled and browser launchers blocked. Version/report subprocesses have 5/90-second deadlines and a 1 MiB output limit; their process groups are cleaned up afterwards. Raw command output, diagnostic messages and authentication URLs are never published. Sign-in failures require running `agy` or signing in through T3 Code yourself; monitoring cannot open a login browser. Reports use the same 90-second cache, refresh throttling, and private last-good store as the other providers.
 
 ## Running on another machine via Tailscale
 
@@ -165,7 +154,7 @@ systemctl --user disable --now ai-quota-dashboard-update.timer  # pause it
 
 ## Notes
 
-- **Claude and Codex tokens are never refreshed or written back.** These providers' refresh tokens are one-time-use, so refreshing them here would log the CLIs out. When a token has expired, the card shows the last successful reading, marked as old, until you run `claude` or `codex` once.
+- **Tokens are never refreshed or written back.** Both providers' refresh tokens are one-time-use, so refreshing them here would log the CLIs out. When a token has expired, the card shows the last successful reading, marked as old, until you run `claude` or `codex` once.
 - The last successful reading is stored in `.cache/last-good.json` (written atomically, readable only by you). It holds usage numbers and emails only, no tokens. If it can't be saved, the error is logged and the live readings are still shown.
 - If an endpoint's reply has a missing or unreadable usage figure, that window shows `—` and "Usage unknown" instead of a guessed percentage.
 - The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1` or listed in `ALLOWED_HOSTS`. That stops other websites from reading it through DNS rebinding.
@@ -177,8 +166,6 @@ systemctl --user disable --now ai-quota-dashboard-update.timer  # pause it
 | Env var | Default |
 |---|---|
 | `PORT` | `7417` |
-| `ANTIGRAVITY_CLI_PATH` | Auto-discovered `agy` executable; override with an absolute path |
-| `T3CODE_HOME` | `~/.t3` — where T3 Code’s Antigravity runtime and provider logins live |
 | `CLIPROXY_AUTH_DIR` | `~/.cli-proxy-api` |
 | `CODEX_HOME` | `~/.codex` |
 | `ALLOWED_HOSTS` | (empty) — comma-separated extra hostnames to accept, e.g. your Tailscale MagicDNS name |

@@ -21,7 +21,7 @@ async function fixture(t, files = {}) {
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, JSON.stringify(value));
   }
-  return { environment: { PATH: '' }, root, home: path.join(root, 'home'), authDir: path.join(root, 'proxy'), codexHome: path.join(root, 'codex'), lastGoodFile: path.join(root, 'cache', 'last-good.json'), platform: 'linux' };
+  return { root, home: path.join(root, 'home'), authDir: path.join(root, 'proxy'), codexHome: path.join(root, 'codex'), lastGoodFile: path.join(root, 'cache', 'last-good.json'), platform: 'linux' };
 }
 
 // Answers the three upstream endpoints from `routes`, keyed by endpoint and then by bearer token.

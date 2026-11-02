@@ -1,12 +1,10 @@
-// Quota collection for Claude, ChatGPT (Codex), and Antigravity subscriptions: credential discovery, the usage
+// Quota collection for Claude and ChatGPT (Codex) subscriptions: credential discovery, the usage
 // endpoints, and the parsers that turn their replies into limit windows.
 //
 // Credentials are read from wherever the CLIs already keep them: the Claude Code Keychain item,
 // ~/.claude/.credentials.json, ~/.codex/auth.json, and CLIProxyAPI's auth dir (~/.cli-proxy-api, used
 // by VibeProxy). Nothing is refreshed or written back: those refresh tokens rotate, so refreshing here
-// would log the CLIs out. Those tokens are only ever sent to api.anthropic.com and chatgpt.com.
-// Antigravity uses its own CLI's supported usage report, or the `/usage` command of the agy runtime T3 Code
-// manages; either one handles its own login.
+// would log the CLIs out. Tokens are only ever sent to api.anthropic.com and chatgpt.com.
 //
 // Importing this module does nothing by itself; createQuotaCollector() returns the cached getter.
 
@@ -15,7 +13,6 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { fetchAntigravity, ANTIGRAVITY_ID } from './antigravity.mjs';
 
 const TTL_MS = 90_000; // normal polling: at most one upstream round per 90s
 const FORCE_MIN_MS = 15_000; // manual refresh: at most one per 15s
@@ -343,9 +340,6 @@ export function createQuotaCollector({
   fetchImpl = fetch,
   now = Date.now,
   lastGoodFile = null,
-  environment = process.env,
-  runAgy,
-  runAgyAcp,
 } = {}) {
   const env = { home, authDir, codexHome, platform, fetchImpl, now };
   const profileCache = new Map();
@@ -370,10 +364,7 @@ export function createQuotaCollector({
 
   async function collect(force) {
     const at = now();
-    const settled = await Promise.allSettled([
-      fetchClaude(env, profileCache, force), fetchCodex(env),
-      fetchAntigravity({ home, environment, run: runAgy, runAcp: runAgyAcp, previouslySeen: Boolean(lastGood[ANTIGRAVITY_ID]) }),
-    ]);
+    const settled = await Promise.allSettled([fetchClaude(env, profileCache, force), fetchCodex(env)]);
     const accounts = settled.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
     let changed = false;
     for (const a of accounts) {
@@ -387,7 +378,7 @@ export function createQuotaCollector({
       }
     }
     if (changed) saveLastGood();
-    const order = { claude: 0, openai: 1, antigravity: 2 };
+    const order = { claude: 0, openai: 1 };
     accounts.sort((a, b) => order[a.provider] - order[b.provider] || (a.plan === 'Free') - (b.plan === 'Free'));
     return { generatedAt: at, accounts };
   }
