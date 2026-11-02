@@ -107,7 +107,7 @@ Accounts are discovered automatically. When the same account appears in several 
 |---|---|
 | Claude | macOS Keychain item `Claude Code-credentials`, `~/.claude/.credentials.json`, CLIProxyAPI `claude-*.json` |
 | ChatGPT / Codex | `~/.codex/auth.json`, CLIProxyAPI `codex-*.json` |
-| Antigravity | The current signed-in `agy` CLI account |
+| Antigravity | The current signed-in `agy` CLI account, or T3 Code’s signed-in Antigravity runtime |
 
 CLIProxyAPI is optional. The dashboard only reads its auth folder (`~/.cli-proxy-api`, the one VibeProxy uses). When the proxy is running, it keeps those tokens fresh.
 
@@ -115,13 +115,13 @@ Usage numbers come from `api.anthropic.com/api/oauth/usage` and `chatgpt.com/bac
 
 ### Antigravity (`agy`)
 
-Install Antigravity CLI **1.1.11 or later** and sign in with `agy` on the machine running the dashboard. The collector finds `agy` on the server’s `PATH`, in `~/.local/bin`, `/usr/local/bin`, or `/opt/homebrew/bin`. For a service with a different PATH, set `ANTIGRAVITY_CLI_PATH` to the executable’s absolute path. An explicit missing path produces a setup error; an absent CLI with no previous reading is omitted.
+Install Antigravity CLI **1.1.11 or later** and sign in with `agy`, or sign in to Antigravity in T3 Code, on the machine running the dashboard. The collector looks for `agy` first — on the server’s `PATH`, in `~/.local/bin`, `/usr/local/bin`, or `/opt/homebrew/bin` — and otherwise falls back to T3 Code’s managed runtime under `~/.t3/tools/antigravity-acp` (overridable via `T3CODE_HOME`). For a service with a different PATH, set `ANTIGRAVITY_CLI_PATH` to the CLI executable’s absolute path. An explicit missing path produces a setup error; an absent CLI/runtime with no previous reading is omitted.
 
-The dashboard runs `agy -p /usage --output-format json --print-timeout 90s`, after verifying its version. This supported read-only command does not start a model turn or consume model quota. It uses the CLI’s existing login; `agy` handles its own authentication/refresh. The dashboard neither copies nor manages Google tokens. The report does not identify the account or plan, so the card says **Local agy account**; it does not combine multiple Google logins.
+With the standalone CLI, the dashboard runs `agy -p /usage --output-format json --print-timeout 90s` after verifying its version. With T3 Code’s runtime (`agy_acp_server.par`), which has no print mode, it opens a one-turn ACP session over stdio and sends `/usage`; the ACP server intercepts `/usage` itself and replies with Markdown built from the same quota groups and buckets. Neither path starts a model turn or consumes model quota. Each uses the existing login and handles its own authentication/refresh; the T3 runtime runs against a throwaway `GEMINI_HOME` with symlinked login files so T3 Code’s own sessions and credentials are never written. The report does not identify the account or plan, so the card says **Local agy account** or **T3 Code agy account**; it does not combine multiple Google logins.
 
 Each reported group (Gemini, Claude/GPT, or a separate model allowance) gets its own quota windows. Only explicit `5h` and `weekly` cadences get pace projections. Missing/out-of-range fractions remain unknown, disabled buckets show **Quota disabled**, and missing resets are not guessed. A passed reset waits for fresh data rather than assuming 100% remaining. Cached failures are marked stale; a retained report belongs to the CLI login used at its capture time, which can differ after switching logins.
 
-Checks run in a temporary private working directory with auto-update disabled and browser launchers blocked. Version/report subprocesses have 5/90-second deadlines and a 1 MiB output limit; their process groups are cleaned up afterwards. Raw command output, diagnostic messages and authentication URLs are never published. Sign-in failures require running `agy` yourself; monitoring cannot open a login browser. Reports use the same 90-second cache, refresh throttling, and private last-good store as the other providers.
+Checks run in a temporary private working directory with auto-update disabled and browser launchers blocked. Version/report subprocesses have 5/90-second deadlines and a 1 MiB output limit; their process groups are cleaned up afterwards. Raw command output, diagnostic messages and authentication URLs are never published. Sign-in failures require running `agy` or signing in through T3 Code yourself; monitoring cannot open a login browser. Reports use the same 90-second cache, refresh throttling, and private last-good store as the other providers.
 
 ## Running on another machine via Tailscale
 
@@ -178,6 +178,7 @@ systemctl --user disable --now ai-quota-dashboard-update.timer  # pause it
 |---|---|
 | `PORT` | `7417` |
 | `ANTIGRAVITY_CLI_PATH` | Auto-discovered `agy` executable; override with an absolute path |
+| `T3CODE_HOME` | `~/.t3` — where T3 Code’s Antigravity runtime and provider logins live |
 | `CLIPROXY_AUTH_DIR` | `~/.cli-proxy-api` |
 | `CODEX_HOME` | `~/.codex` |
 | `ALLOWED_HOSTS` | (empty) — comma-separated extra hostnames to accept, e.g. your Tailscale MagicDNS name |

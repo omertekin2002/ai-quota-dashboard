@@ -5,7 +5,8 @@
 // ~/.claude/.credentials.json, ~/.codex/auth.json, and CLIProxyAPI's auth dir (~/.cli-proxy-api, used
 // by VibeProxy). Nothing is refreshed or written back: those refresh tokens rotate, so refreshing here
 // would log the CLIs out. Those tokens are only ever sent to api.anthropic.com and chatgpt.com.
-// Antigravity uses its own CLI's supported usage report; agy manages that login itself.
+// Antigravity uses its own CLI's supported usage report, or the `/usage` command of the agy runtime T3 Code
+// manages; either one handles its own login.
 //
 // Importing this module does nothing by itself; createQuotaCollector() returns the cached getter.
 
@@ -344,6 +345,7 @@ export function createQuotaCollector({
   lastGoodFile = null,
   environment = process.env,
   runAgy,
+  runAgyAcp,
 } = {}) {
   const env = { home, authDir, codexHome, platform, fetchImpl, now };
   const profileCache = new Map();
@@ -370,7 +372,7 @@ export function createQuotaCollector({
     const at = now();
     const settled = await Promise.allSettled([
       fetchClaude(env, profileCache, force), fetchCodex(env),
-      fetchAntigravity({ home, environment, run: runAgy, previouslySeen: Boolean(lastGood[ANTIGRAVITY_ID]) }),
+      fetchAntigravity({ home, environment, run: runAgy, runAcp: runAgyAcp, previouslySeen: Boolean(lastGood[ANTIGRAVITY_ID]) }),
     ]);
     const accounts = settled.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
     let changed = false;

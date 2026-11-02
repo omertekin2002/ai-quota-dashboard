@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { antigravityWindows, fetchAntigravity, findAntigravity, runAntigravity } from '../antigravity.mjs';
+import {
+  antigravityWindows, fetchAntigravity, findAntigravity, findT3Antigravity, parseAcpUsage, runAntigravity, runAntigravityAcp,
+} from '../antigravity.mjs';
 import { createQuotaCollector } from '../quotas.mjs';
 
 // Synthetic, using the upstream CLI report schema linked in antigravity.mjs.
@@ -181,4 +183,200 @@ test('collector caches agy, retains private last-good readings on failure/restar
   const mixed = await createQuotaCollector({ ...settings, fetchImpl: async () => Response.json({ rate_limit: { primary_window: { used_percent: 20 } } }) })(true);
   assert.deepEqual(mixed.accounts.map((a) => a.provider), ['openai', 'antigravity']);
   assert.equal(mixed.accounts[0].windows[0].usedPct, 20);
+});
+
+// ---------- T3 Code's agy ACP runtime ----------
+
+// The Markdown agy_acp_server 1.4.1 sends for `/usage` (real layout, synthetic numbers).
+const ACP_USAGE = `### Session Usage
+- **Session total:** data not available yet
+
+### Quota Limits
+- **Gemini Models**
+  *(Models within this group: Gemini Flash, Gemini Pro)*
+  - **Weekly Limit Remaining:** 98% remaining (resets Nov 03, 2026, 14:20 UTC)
+  - **Five Hour Limit Remaining:** 64% remaining (resets Nov 02, 2026, 23:59 UTC)
+- **Claude and GPT models**
+  *(Models within this group: Claude Opus, Claude Sonnet, GPT-OSS)*
+  - **Weekly Limit Remaining:** 0% remaining (resets Nov 03, 2026, 13:58 UTC)
+- **Gemini 4 Argon**
+  *(For paid Pro plans, Argon quota is separate.)*
+  - **Gemini 4 Argon Weekly Limit:** 100% remaining (resets Nov 09, 2026, 20:43 UTC)`;
+
+test('parses the ACP /usage Markdown into the same windows as the CLI report', () => {
+  const windows = antigravityWindows(parseAcpUsage(ACP_USAGE));
+  assert.deepEqual(windows.map((w) => [w.label, w.usedPct, w.windowSec, w.resetsAt]), [
+    ['Gemini Models · Weekly', 2, 604800, Date.parse('2026-11-03T14:20:00Z')],
+    ['Gemini Models · 5-hour', 36, 18000, Date.parse('2026-11-02T23:59:00Z')],
+    ['Claude and GPT models · Weekly', 100, 604800, Date.parse('2026-11-03T13:58:00Z')],
+    ['Gemini 4 Argon · Weekly', 0, 604800, Date.parse('2026-11-09T20:43:00Z')],
+  ]);
+  const odd = antigravityWindows(parseAcpUsage(`### Quota Limits
+- **Models**
+  - **Daily Requests:** 1,000 units remaining
+  - **Weekly Limit Remaining:** Available (resets 2026-11-09T12:00:00Z)
+  - **Five Hour Limit Remaining:** Disabled: Not on this plan
+- **Empty**
+  - No active bucket limits`));
+  assert.deepEqual(odd.map((w) => [w.label, w.usedPct, w.windowSec, w.disabled]), [
+    ['Models · Daily Requests', null, null, false], ['Models · Weekly', null, 604800, false], ['Models · 5-hour', null, 18000, true],
+  ]);
+  assert.equal(odd[1].resetsAt, Date.parse('2026-11-09T12:00:00Z'));
+});
+
+test('ACP /usage failures map to specific errors, and malformed replies are rejected', () => {
+  const limits = (line) => `### Session Usage\n- x\n\n### Quota Limits\n${line}`;
+  for (const [line, code] of [
+    ['- Unable to retrieve quota status (HTTP 403 private-secret)', 'QUOTA'],
+    ['- Not applicable for current authentication method.', 'METHOD'],
+    ['- data not available yet', 'AUTH'],
+  ]) assert.throws(() => parseAcpUsage(limits(line)), { code });
+  for (const input of [undefined, '', 'no section', limits('- No quota limits reported.'), limits('  - **Weekly:** 5% remaining')]) {
+    assert.throws(() => antigravityWindows(parseAcpUsage(input)), { code: 'REPORT' });
+  }
+});
+
+// A fake agy_acp_server: logs how it was launched, simulates a token refresh by atomic replace, refuses
+// nothing itself but asks the client for a permission (which must be refused) before ending the turn.
+const FAKE_ACP = `
+  const fs = require('node:fs'), path = require('node:path');
+  const log = (o) => fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify(o) + '\\n');
+  const state = path.join(process.env.GEMINI_HOME, 'antigravity-acp');
+  const token = path.join(state, 'acp_token.json');
+  log({ args: process.argv.slice(2), cwd: process.cwd(), home: process.env.GEMINI_HOME, harness: process.env.ANTIGRAVITY_HARNESS_PATH,
+    storage: process.env.AGY_ACP_FORCE_FILE_STORAGE, link: fs.lstatSync(token).isSymbolicLink(), token: fs.readFileSync(token, 'utf8'),
+    settings: fs.readFileSync(path.join(state, 'settings.json'), 'utf8') });
+  const out = (m) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...m }) + '\\n');
+  const chunk = (sessionId, text) => out({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } });
+  let prompt;
+  require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
+    const m = JSON.parse(line);
+    if (m.method === 'initialize') out({ id: m.id, result: { protocolVersion: 1 } });
+    else if (m.method === 'session/new') {
+      if (process.env.FAKE_MODE === 'auth') return out({ id: m.id, error: { code: -32000, message: 'Authentication required private-secret' } });
+      fs.writeFileSync(token + '.tmp', 'refreshed');
+      fs.renameSync(token + '.tmp', token);
+      out({ id: m.id, result: { sessionId: 's1' } });
+    } else if (m.method === 'session/prompt') {
+      if (process.env.FAKE_MODE === 'hang') return;
+      log({ prompt: m.params.prompt });
+      prompt = m.id;
+      chunk('other-session', 'ignored');
+      const text = process.env.FAKE_REPLY;
+      chunk('s1', text.slice(0, 40));
+      chunk('s1', text.slice(40));
+      out({ id: 'ask', method: 'session/request_permission', params: {} });
+    } else if (m.id === 'ask') {
+      log({ refused: m.error && m.error.code });
+      out({ id: prompt, result: { stopReason: 'end_turn' } });
+    }
+  });
+`;
+
+function t3Fixture(t, { mode = 'ok', reply = ACP_USAGE } = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'test-agy-t3-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const tools = path.join(home, '.t3/tools/antigravity-acp', `${process.platform}-${process.arch}`);
+  const dir = path.join(tools, 'versions', 'rel-1');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(tools, 'active.json'), JSON.stringify({ releaseId: 'rel-1' }));
+  const server = path.join(dir, 'agy_acp_server.par');
+  fs.writeFileSync(server, `#!${process.execPath}\n${FAKE_ACP}`, { mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'localharness_external'), '#!/bin/sh\n', { mode: 0o700 });
+  const instance = (name, mtime) => {
+    const state = path.join(home, '.t3/userdata/providers/antigravity', name, 'antigravity-acp');
+    fs.mkdirSync(state, { recursive: true });
+    fs.writeFileSync(path.join(state, 'settings.json'), '{"auth":{"type":"oauth-personal"}}');
+    fs.writeFileSync(path.join(state, 'acp_token.json'), `secret-token-${name}`, { mode: 0o600 });
+    fs.utimesSync(path.join(state, 'acp_token.json'), mtime, mtime);
+    return path.dirname(state);
+  };
+  const old = instance('old', new Date('2026-01-01'));
+  const current = instance('current', new Date('2026-11-01'));
+  const log = path.join(home, 'calls');
+  return { home, server, old, current, log, environment: { PATH: '', FAKE_LOG: log, FAKE_MODE: mode, FAKE_REPLY: reply } };
+}
+const calls = (file) => fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+
+test('finds T3 Code’s active agy runtime and its most recently signed-in provider instance', (t) => {
+  const opts = t3Fixture(t);
+  const found = findT3Antigravity(opts);
+  assert.equal(found.server, opts.server);
+  assert.equal(found.harness, path.join(path.dirname(opts.server), 'localharness_external'));
+  assert.equal(found.geminiHome, opts.current);
+  assert.equal(findT3Antigravity({ home: os.tmpdir(), environment: { T3CODE_HOME: path.join(opts.home, '.t3') } }).server, opts.server);
+  assert.equal(findT3Antigravity({ ...opts, environment: { T3CODE_HOME: 'relative/.t3' } }), null);
+  fs.rmSync(path.join(opts.current, 'antigravity-acp/acp_token.json'));
+  assert.equal(findT3Antigravity(opts).geminiHome, opts.old);
+  fs.rmSync(path.join(opts.old, 'antigravity-acp/acp_token.json'));
+  assert.equal(findT3Antigravity(opts).geminiHome, null);
+  const active = path.join(path.dirname(path.dirname(path.dirname(opts.server))), 'active.json');
+  fs.writeFileSync(active, JSON.stringify({ releaseId: '..' }));
+  assert.equal(findT3Antigravity(opts), null);
+  fs.writeFileSync(active, JSON.stringify({ releaseId: 'rel-1' }));
+  fs.chmodSync(path.join(path.dirname(opts.server), 'localharness_external'), 0o600);
+  assert.equal(findT3Antigravity(opts), null);
+});
+
+test('T3 runtime: sends only /usage over ACP from a throwaway Gemini home and never writes T3 Code’s files', async (t) => {
+  const opts = t3Fixture(t);
+  const [account] = await fetchAntigravity(opts);
+  assert.equal(account.error, undefined);
+  assert.deepEqual(account.sources, ['T3 Code agy runtime']);
+  assert.equal(account.windows.length, 4);
+  assert.equal(account.windows[0].usedPct, 2);
+  assert.equal(account.limitReached, true);
+  const [launch, prompt, refused] = calls(opts.log);
+  assert.deepEqual(launch.args, ['--uid=']);
+  assert.equal(launch.link, true);
+  assert.equal(launch.token, 'secret-token-current');
+  assert.equal(launch.settings, '{"auth":{"type":"oauth-personal"}}');
+  assert.equal(launch.storage, '1');
+  assert.equal(launch.harness, path.join(path.dirname(opts.server), 'localharness_external'));
+  for (const dir of [launch.cwd, launch.home]) {
+    assert.ok(!dir.startsWith(opts.home), dir);
+    assert.equal(fs.existsSync(dir), false);
+  }
+  assert.deepEqual(prompt.prompt, [{ type: 'text', text: '/usage' }]);
+  assert.equal(refused.refused, -32601);
+  // The simulated refresh replaced only the temporary link.
+  assert.equal(fs.readFileSync(path.join(opts.current, 'antigravity-acp/acp_token.json'), 'utf8'), 'secret-token-current');
+  assert.deepEqual(fs.readdirSync(path.join(opts.current, 'antigravity-acp')).sort(), ['acp_token.json', 'settings.json']);
+  assert.ok(!JSON.stringify(account).includes('secret-token') && !JSON.stringify(account).includes(opts.home));
+});
+
+test('T3 runtime: sign-in and quota failures are reported without leaking server output', async (t) => {
+  const [auth] = await fetchAntigravity(t3Fixture(t, { mode: 'auth' }));
+  assert.match(auth.error, /Sign in to Antigravity in T3 Code/);
+  assert.ok(!JSON.stringify(auth).includes('private-secret'));
+  const [quota] = await fetchAntigravity(t3Fixture(t, { reply: '### Quota Limits\n- Unable to retrieve quota status (private-secret)' }));
+  assert.match(quota.error, /could not retrieve quota status/);
+  assert.ok(!JSON.stringify(quota).includes('private-secret'));
+  const [method] = await fetchAntigravity(t3Fixture(t, { reply: '### Quota Limits\n- Not applicable for current authentication method.' }));
+  assert.match(method.error, /only for Google account sign-ins/);
+  const [garbage] = await fetchAntigravity(t3Fixture(t, { reply: 'private-secret' }));
+  assert.match(garbage.error, /no valid quota report/);
+});
+
+test('T3 runtime without a login is omitted unless previously seen; the standalone CLI takes precedence', async (t) => {
+  const opts = t3Fixture(t);
+  for (const instance of [opts.old, opts.current]) fs.rmSync(path.join(instance, 'antigravity-acp/acp_token.json'));
+  let acpCalls = 0;
+  const runAcp = async () => { acpCalls++; return ACP_USAGE; };
+  assert.deepEqual(await fetchAntigravity({ ...opts, runAcp }), []);
+  const [seen] = await fetchAntigravity({ ...opts, runAcp, previouslySeen: true });
+  assert.match(seen.error, /Sign in to Antigravity in T3 Code/);
+  assert.equal(acpCalls, 0);
+  const cli = fixture(t, `console.log(process.argv[2] === '--version' ? '1.2.2' : ${JSON.stringify(JSON.stringify(report([weekly])))})`);
+  const [account] = await fetchAntigravity({ ...cli, home: opts.home, runAcp });
+  assert.deepEqual(account.sources, ['agy CLI']);
+  assert.equal(account.windows[0].usedPct, 14);
+  assert.equal(acpCalls, 0);
+});
+
+test('ACP runner times out a stalled turn and cleans up', async (t) => {
+  const opts = t3Fixture(t, { mode: 'hang' });
+  const env = { ...process.env, ...opts.environment, GEMINI_HOME: opts.current };
+  await assert.rejects(runAntigravityAcp(opts.server, { cwd: opts.home, env, timeoutMs: 1500 }), { code: 'TIMEOUT' });
+  await assert.rejects(runAntigravityAcp(path.join(opts.home, 'missing'), { cwd: opts.home, env, timeoutMs: 1500 }), { code: 'LAUNCH' });
 });

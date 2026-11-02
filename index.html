@@ -1016,7 +1016,7 @@
 
   function renderCard(a, now, ai) {
     const mono = a.provider === 'claude' ? '✳' : a.provider === 'antigravity' ? '✦' : '◎';
-    const sub = a.email || (a.provider === 'antigravity' ? 'Local agy account' : '');
+    const sub = a.email || (a.provider === 'antigravity' ? (a.sources?.includes('T3 Code agy runtime') ? 'T3 Code agy account' : 'Local agy account') : '');
     const via = `Read from ${a.sources?.join(' + ') || 'n/a'}`;
     const fresh = a.stale
       ? `<span class="fresh stale" title="${esc(`${a.error} ${via}`)}">◷ ${esc(ago(a.fetchedAt))}</span>`

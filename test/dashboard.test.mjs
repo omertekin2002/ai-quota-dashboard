@@ -1130,3 +1130,13 @@ test('Antigravity cards render shared quotas, disabled/unknown buckets and expir
   page.click(page.winEl(0, 0));
   assert.ok(page.element('content').innerHTML.includes('<span class="k">Used:</span> 75%'));
 });
+
+test('Antigravity read through T3 Code’s runtime is labelled as such', async () => {
+  const windows = antigravityWindows({ status: 'SUCCESS', command: { name: 'usage', data: { groups: [
+    { name: 'Gemini Models', buckets: [{ id: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 0.98 }] },
+  ] } } });
+  const page = await renderQuotas(quotasOf(account('antigravity:local', windows, {
+    provider: 'antigravity', name: 'Antigravity', plan: null, email: null, sources: ['T3 Code agy runtime'],
+  })));
+  assert.ok(page.cards.includes('T3 Code agy account') && !page.cards.includes('Local agy account'));
+});
