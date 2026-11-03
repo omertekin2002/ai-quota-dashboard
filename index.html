@@ -23,6 +23,7 @@
     --healthy: #247345;
     --claude: #c96442;
     --openai: #0b0b0b;
+    --antigravity: #3569c8;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -40,6 +41,7 @@
       --healthy: #6fcf97;
       --claude: #d97757;
       --openai: #f0efec;
+      --antigravity: #80aaff;
     }
   }
   * { box-sizing: border-box; }
@@ -77,6 +79,7 @@
     font-weight: 700; font-size: 13px; color: var(--surface); }
   .mono.claude { background: var(--claude); }
   .mono.openai { background: var(--openai); }
+  .mono.antigravity { background: var(--antigravity); }
   .who { min-width: 0; }
   .who .name { font-weight: 650; font-size: 15px; display: flex; align-items: center; gap: 8px; }
   .plan { font-size: 11px; font-weight: 600; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
@@ -856,7 +859,7 @@
       return `<li class="glance-row"><div class="glance-who"><strong>${esc(a.name)}${a.plan ? ` ${esc(a.plan)}` : ''}</strong>${a.email ? ` · ${esc(a.email)}` : ''}</div>
         <div class="glance-what">${what}${age != null ? ` <span class="warning">◷ ${esc(ago(age))}</span>` : ''}</div></li>`;
     });
-    $('glance-capacity').innerHTML = rows.length ? `<ul class="glance-list">${rows.join('')}</ul>${failed}` : `${glanceNote('No Claude or ChatGPT logins found')}${failed}`;
+    $('glance-capacity').innerHTML = rows.length ? `<ul class="glance-list">${rows.join('')}</ul>${failed}` : `${glanceNote('No Claude, ChatGPT or Antigravity logins found')}${failed}`;
   }
 
   // build-workflow's own attention list, counted by its own kinds: no re-ranking and no new categories.
@@ -950,7 +953,7 @@
   function resetText(w, v) {
     if (v.resetPassed) return 'reset since last reading';
     if (v.notStarted) return 'starts on first use';
-    if (v.toReset == null) return w.windowSec ? '' : 'resets with billing cycle';
+    if (v.toReset == null) return w.resetUnknown ? 'Reset time unavailable' : w.windowSec ? '' : 'resets with billing cycle';
     return `resets in ${fmtDur(v.toReset)} · ${fmtClock(w.resetsAt)}`;
   }
 
@@ -1015,7 +1018,7 @@
   const readingAt = (a) => a.fetchedAt ?? data.generatedAt;
 
   function renderCard(a, now, ai) {
-    const mono = a.provider === 'claude' ? '✳' : '◎';
+    const mono = a.provider === 'claude' ? '✳' : a.provider === 'antigravity' ? '✦' : '◎';
     const sub = a.email || '';
     const via = `Read from ${a.sources?.join(' + ') || 'n/a'}`;
     const fresh = a.stale
@@ -1083,9 +1086,9 @@
     const live = new Set(data.accounts.flatMap((a) => (a.windows || []).map((w) => windowKey(a, w))));
     for (const key of openWindows) if (!live.has(key)) openWindows.delete(key);
     const failed = quotaError ? ` · <span class="version-warn">⚠ Couldn't refresh</span>` : '';
-    $('meta').innerHTML = `Claude &amp; ChatGPT · updated ${esc(ago(data.generatedAt))}${failed}${versionHtml(version)}`;
+    $('meta').innerHTML = `Claude, ChatGPT &amp; Antigravity · updated ${esc(ago(data.generatedAt))}${failed}${versionHtml(version)}`;
     if (!data.accounts.length) {
-      $('content').innerHTML = `<div class="empty">No Claude or ChatGPT logins found. Sign in with <code>claude</code> or <code>codex</code>, or add accounts to CLIProxyAPI (<code>~/.cli-proxy-api</code>).</div>`;
+      $('content').innerHTML = `<div class="empty">No Claude, ChatGPT or Antigravity logins found. Sign in with <code>claude</code> or <code>codex</code>, connect Antigravity in T3 Code, or add accounts to CLIProxyAPI (<code>~/.cli-proxy-api</code>).</div>`;
       $('legend').hidden = true;
       hideTip();
       return;

@@ -1,6 +1,6 @@
 # ai-quota-dashboard
 
-A local dashboard showing how much of your **5-hour** and **weekly** limits is left on Claude and ChatGPT (Codex) subscriptions.
+A local dashboard showing how much of your **5-hour** and **weekly** limits is left on Claude, ChatGPT (Codex), and Google Antigravity subscriptions.
 
 No dependencies, no build step. Needs Node 18+.
 
@@ -101,16 +101,21 @@ GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and `dep
 
 ## Where the credentials come from
 
-Accounts are discovered automatically. When the same account appears in several places, it's shown once.
+Accounts are discovered automatically. Claude/Codex accounts are grouped across sources; identical Antigravity OAuth logins saved in multiple T3 profiles are shown once.
 
 | Provider | Sources |
 |---|---|
 | Claude | macOS Keychain item `Claude Code-credentials`, `~/.claude/.credentials.json`, CLIProxyAPI `claude-*.json` |
 | ChatGPT / Codex | `~/.codex/auth.json`, CLIProxyAPI `codex-*.json` |
+| Antigravity | T3 Code profiles at `~/.t3/userdata/providers/antigravity/*/antigravity-acp/acp_token.json` (personal Google OAuth) |
 
 CLIProxyAPI is optional. The dashboard only reads its auth folder (`~/.cli-proxy-api`, the one VibeProxy uses). When the proxy is running, it keeps those tokens fresh.
 
 Usage numbers come from `api.anthropic.com/api/oauth/usage` and `chatgpt.com/backend-api/wham/usage`. These are the same endpoints the Claude Code and Codex apps call. They're unofficial and may change.
+
+Antigravity quotas are collected directly from Google's `v1internal:retrieveUserQuotaSummary` API on `daily-cloudcode-pa.googleapis.com` and `cloudcode-pa.googleapis.com`, using the login T3 already saved. T3 does not need to be running. The collector reads both endpoints and keeps the higher usage for duplicate buckets; older accounts fall back to `fetchAvailableModels`. Cards show Gemini, Gemini Argon, and shared Claude/GPT buckets as reported, including their five-hour and weekly windows. Legacy model quotas without a reported cadence get no invented window length, billing cycle, or pace projection. Untouched buckets with a moving reset of now plus the window length get no countdown.
+
+The collector renews Google's access token using the saved refresh token and retains it only in memory, until one minute before expiry. It never writes to T3's login files, launches AGY, or makes a model request. Account email is optional and comes from Google's user-info endpoint. Requests use fixed Google destinations, reject redirects, time out after 10 seconds each, and have a 30-second total budget per login. Missing/malformed quota responses retain the last successful reading with a stale warning. Enterprise, API-key, and gateway logins are not collected. These Google quota APIs are internal and may change.
 
 ## Running on another machine via Tailscale
 
@@ -154,7 +159,7 @@ systemctl --user disable --now ai-quota-dashboard-update.timer  # pause it
 
 ## Notes
 
-- **Tokens are never refreshed or written back.** Both providers' refresh tokens are one-time-use, so refreshing them here would log the CLIs out. When a token has expired, the card shows the last successful reading, marked as old, until you run `claude` or `codex` once.
+- **Claude/Codex tokens are never refreshed or written back.** When a token has expired, the card shows the last successful reading, marked as old, until you run `claude` or `codex` once. Antigravity renews Google access tokens in memory as described above; a revoked Google login asks you to sign in again in T3 Code.
 - The last successful reading is stored in `.cache/last-good.json` (written atomically, readable only by you). It holds usage numbers and emails only, no tokens. If it can't be saved, the error is logged and the live readings are still shown.
 - If an endpoint's reply has a missing or unreadable usage figure, that window shows `—` and "Usage unknown" instead of a guessed percentage.
 - The server binds to `127.0.0.1` and rejects requests whose `Host` isn't `localhost`/`127.0.0.1` or listed in `ALLOWED_HOSTS`. That stops other websites from reading it through DNS rebinding.
@@ -168,5 +173,6 @@ systemctl --user disable --now ai-quota-dashboard-update.timer  # pause it
 | `PORT` | `7417` |
 | `CLIPROXY_AUTH_DIR` | `~/.cli-proxy-api` |
 | `CODEX_HOME` | `~/.codex` |
+| `T3_STATE_DIR` | `~/.t3/userdata` — dashboard override for discovering saved Antigravity logins |
 | `ALLOWED_HOSTS` | (empty) — comma-separated extra hostnames to accept, e.g. your Tailscale MagicDNS name |
 | `AGENTCTL` | `~/.local/bin/agentctl` — the build-workflow CLI the pipeline panel runs |

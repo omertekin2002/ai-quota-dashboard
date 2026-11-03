@@ -229,6 +229,23 @@ async function renderQuotas(quotas) {
   return { ...page, cards, table };
 }
 
+test('Antigravity renders grouped quotas and unknown reset cadence in cards, table and capacity', async () => {
+  const page = await renderQuotas(quotasOf(account('antigravity:a', [
+    win('Gemini · 5-hour', 25, 9000),
+    win('Claude & GPT (shared) · Weekly', 80, 302_400, WEEK),
+    { id: 'legacy', label: 'Gemini · Reported quota', usedPct: 10, resetsAt: null, windowSec: null, resetUnknown: true },
+  ], { provider: 'antigravity', name: 'Antigravity', plan: null, sources: ['T3 Code'] })));
+  assert.ok(page.cards.includes('mono antigravity') && page.cards.includes('✦'));
+  assert.ok(page.cards.includes('Read from T3 Code'));
+  assert.ok(page.cards.includes('Claude &amp; GPT (shared) · Weekly'));
+  assert.ok(page.element('glance-capacity').innerHTML.includes('Antigravity'));
+  for (const output of [page.cards, page.table]) {
+    assert.ok(output.includes('Reset time unavailable'));
+    assert.ok(!output.includes('resets with billing cycle'));
+  }
+  assert.ok(!winsOf(page.cards)[2].includes('class="pace"'));
+});
+
 test('quota cards project the pace, warn before running out, and place the time-left tick', async () => {
   const { cards, hover } = await renderQuotas(quotasOf(account('claude:a', [
     win('Half', 30, 9000), // halfway, 30% used: 30% more by the reset, so about 40% left
@@ -633,7 +650,7 @@ test('the meta line shows the running commit and warns in text when it is not cu
   const link = (sha) => `<a href="https://github.com/omertekin2002/ai-quota-dashboard/commit/${sha}" target="_blank" rel="noopener noreferrer"><code>${sha}</code></a>`;
 
   const current = await meta(base);
-  assert.ok(current.startsWith('Claude &amp; ChatGPT · updated '), current);
+  assert.ok(current.startsWith('Claude, ChatGPT &amp; Antigravity · updated '), current);
   assert.ok(current.endsWith(` · running ${link('abc1234')}`), current);
   assert.ok(!current.includes('⚠'));
 

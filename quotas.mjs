@@ -1,10 +1,10 @@
-// Quota collection for Claude and ChatGPT (Codex) subscriptions: credential discovery, the usage
+// Quota collection for Claude, ChatGPT (Codex) and Antigravity: credential discovery, the usage
 // endpoints, and the parsers that turn their replies into limit windows.
 //
 // Credentials are read from wherever the CLIs already keep them: the Claude Code Keychain item,
 // ~/.claude/.credentials.json, ~/.codex/auth.json, and CLIProxyAPI's auth dir (~/.cli-proxy-api, used
-// by VibeProxy). Nothing is refreshed or written back: those refresh tokens rotate, so refreshing here
-// would log the CLIs out. Tokens are only ever sent to api.anthropic.com and chatgpt.com.
+// by VibeProxy). Claude/Codex tokens are never refreshed or written back. Antigravity's Google
+// OAuth renewal and quota calls live in antigravity.mjs; its credential files are also read-only.
 //
 // Importing this module does nothing by itself; createQuotaCollector() returns the cached getter.
 
@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { createAntigravityCollector } from './antigravity.mjs';
 
 const TTL_MS = 90_000; // normal polling: at most one upstream round per 90s
 const FORCE_MIN_MS = 15_000; // manual refresh: at most one per 15s
@@ -336,6 +337,7 @@ export function createQuotaCollector({
   home = os.homedir(),
   authDir = path.join(home, '.cli-proxy-api'),
   codexHome = path.join(home, '.codex'),
+  t3StateDir = path.join(home, '.t3', 'userdata'),
   platform = process.platform,
   fetchImpl = fetch,
   now = Date.now,
@@ -343,6 +345,7 @@ export function createQuotaCollector({
 } = {}) {
   const env = { home, authDir, codexHome, platform, fetchImpl, now };
   const profileCache = new Map();
+  const fetchAntigravity = createAntigravityCollector({ t3StateDir, fetchImpl, now, platform });
   let lastGood = (lastGoodFile && readJson(lastGoodFile)) || {};
   // Written atomically (tmp file + rename) and private, since it holds account emails. A failed save
   // only loses the fallback for the next restart, so it's logged and the live readings are still served.
@@ -364,7 +367,7 @@ export function createQuotaCollector({
 
   async function collect(force) {
     const at = now();
-    const settled = await Promise.allSettled([fetchClaude(env, profileCache, force), fetchCodex(env)]);
+    const settled = await Promise.allSettled([fetchClaude(env, profileCache, force), fetchCodex(env), fetchAntigravity()]);
     const accounts = settled.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
     let changed = false;
     for (const a of accounts) {
@@ -378,7 +381,7 @@ export function createQuotaCollector({
       }
     }
     if (changed) saveLastGood();
-    const order = { claude: 0, openai: 1 };
+    const order = { claude: 0, openai: 1, antigravity: 2 };
     accounts.sort((a, b) => order[a.provider] - order[b.provider] || (a.plan === 'Free') - (b.plan === 'Free'));
     return { generatedAt: at, accounts };
   }
