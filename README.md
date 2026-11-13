@@ -19,6 +19,8 @@ At the top, an **At a glance** strip answers three questions before you scroll. 
 
 The strip adds no requests. It's built from the quota, pipeline and computer readings the page already loads, and it redraws whenever one of them does. When a source can't be read, only its own tile says so: "⚠ Couldn't refresh" with the age of the last reading, or "Unavailable" when there's none yet.
 
+Below the strip, the panels come in the same order as its tiles: the quota cards, then the [Agent pipeline](#agent-pipeline), then the [Workspace computer](#workspace-computer) with its Computer diagnostics. While the computer is healthy, its panel is a single line, so the quota cards are the first thing under the strip.
+
 For each account and limit window, including model-specific ones such as Claude's Fable-only weekly limit when your plan has one:
 
 - how much is left, as a % with a meter
@@ -58,7 +60,11 @@ Unlike the process panel below, this panel publishes GitHub issue and PR titles 
 
 ## Workspace computer
 
-On Linux, the **Workspace computer** panel reports the computer running the dashboard:
+On Linux, the **Workspace computer** panel reports the computer running the dashboard.
+
+While every reading is healthy, the panel collapses to one line in its header, such as "✓ All OK · up 3d 4h · checked 20s ago", and **Show details** opens the readings below and the Computer diagnostics. It opens by itself whenever a reading is a warning or critical (the same conditions the At a glance tile counts), and when the reading is old or couldn't be updated. Once you open or close it, it stays that way through refreshes. The browser remembers that choice when it can store it. A condition that wasn't on screen before still opens it, so a new problem is never hidden; a reading that only moves, such as the battery going from 25% to 24%, doesn't count as new. The glance tile's **Workspace** link opens it too. With the panel closed, its header counts the open conditions instead of "All OK", and a note under it says when the reading is old or failed.
+
+The readings are:
 
 - Battery state of charge, charging state, and AC power.
 - CPU temperature, plus GPU and SSD temperatures when their sensors are readable.
@@ -67,7 +73,7 @@ On Linux, the **Workspace computer** panel reports the computer running the dash
 - Whether **CLIProxyAPI**, **ngrok-proxy-llm**, **T3 Code**, **Tailscale**, and the **network watchdog** are running, with automatic restart counts and service uptime. HTTP checks separately verify T3's local page and Tailscale route, CLIProxyAPI's `/healthz`, the retry proxy's backend-aware `/health`, and its public ngrok route. They don't send LLM requests or refresh credentials.
 - An **Auto-update** row for the updater in [Keeping hp-laptop up to date](#keeping-hp-laptop-up-to-date), such as "Auto-update: last run 19:45 ✓ · next 20:00". A failed run shows a ⚠ warning with its exit status and the `journalctl --user -u ai-quota-dashboard-update` command that explains it; a stopped timer gets its own ⚠ warning. On a machine without the updater units the row just says "not installed". It comes from one read-only `systemctl --user show` of `ai-quota-dashboard-update.service` and its timer, published as `autoUpdate` in `/api/workspace`.
 
-Below the quota cards, **Computer diagnostics** adds:
+Below the panel, behind the same **Show details** button, **Computer diagnostics** adds:
 
 - Linux CPU, memory, and I/O pressure (the share of time tasks were stalled over the last 10 seconds), plus the five largest processes by resident memory. The top-memory list shows executable names and PIDs, without arguments or environments. Memory warnings use available RAM and pressure: warning at ≤10% available, ≥10% partial stalls, or ≥1% full stalls; critical at ≤5% available or ≥10% full stalls.
 - Internal SSD and T7 free space, actual T7 mount presence, read-only mount detection, and the last backup result, last known success, and next scheduled run. An autofs placeholder does not count as a mounted T7. A previous successful backup remains recorded if a later run fails; the last-success time is unknown if monitoring starts after a failure with no earlier record.
