@@ -102,7 +102,7 @@ async function page(pipelineResponse) {
       }
       return { ok: true, json: async () => url.startsWith('/api/workspace') ? { generatedAt: Date.now(), supported: false } : { generatedAt: Date.now(), accounts: [] } };
     },
-    AbortSignal, setInterval() {}, setTimeout() {},
+    AbortSignal, setInterval() {}, setTimeout() {}, addEventListener() {}, location: { hash: '' },
   });
   const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
   new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]).runInContext(context);

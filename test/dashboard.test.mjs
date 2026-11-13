@@ -15,12 +15,14 @@ const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
 // `setInterval` callbacks are kept in `intervals` the same way; `tick()` fires the 15-second clock update.
 // `document.elementFromPoint` answers null (the pointer is over nothing) until a test replaces it.
 // `media.fine` is what `matchMedia('(hover: hover) and (pointer: fine)')` answers: a mouse or trackpad.
-async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond, abortSignalTimeout = true } = {}) {
+// `hash` is the page URL's fragment at load; `location.hash` can change later, and `fire('hashchange')` announces it.
+// `storage` is the page's `localStorage` (none by default, as in a vm), e.g. a Map-backed stub or one that throws.
+async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond, abortSignalTimeout = true, hash = '', storage } = {}) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
       elements.set(id, {
-        innerHTML: '', textContent: '', hidden: hidden(id), style: {}, setAttribute() {},
+        innerHTML: '', textContent: '', hidden: hidden(id), style: {}, attributes: {}, setAttribute(name, value) { this.attributes[name] = String(value); },
         getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 0, width: 200, height: 100 }),
         querySelectorAll(selector) { return selector === '.win' ? winElements(this.innerHTML) : []; },
       });
@@ -40,6 +42,8 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
     });
   }
   const listeners = {};
+  const windowListeners = {};
+  const location = { hash };
   const timeouts = [];
   const timers = []; // { fn, ms } for each setTimeout
   const intervals = []; // { fn, ms } for each setInterval
@@ -65,7 +69,9 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
     setInterval: (fn, ms) => { intervals.push({ fn, ms }); }, innerWidth: 1280, innerHeight: 800,
     matchMedia: (query) => ({ matches: query === '(hover: hover) and (pointer: fine)' && media.fine }),
     setTimeout: (fn, ms) => { timeouts.push(ms); timers.push({ fn, ms }); return timeouts.length; },
+    location, addEventListener: (type, fn) => { (windowListeners[type] ||= []).push(fn); },
   };
+  if (storage !== undefined) Object.defineProperty(globals, 'localStorage', { get: () => (typeof storage === 'function' ? storage() : storage) });
   if (now != null) {
     globals.Date = class extends Date {
       constructor(...args) { if (args.length) super(...args); else super(now); }
@@ -90,7 +96,8 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   };
   const click = (el) => dispatch('click', { target: el });
   const press = (el, key, fields = {}) => dispatch('keydown', { target: el, key, ...fields });
-  return { context, document, element, media, listeners, timeouts, timers, intervals, tick: () => intervals.find((i) => i.ms === 15_000).fn(), signals, expire, dispatch, winEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
+  const fire = (type) => { for (const fn of windowListeners[type] || []) fn({ type }); };
+  return { context, document, element, media, listeners, location, fire, timeouts, timers, intervals, tick: () => intervals.find((i) => i.ms === 15_000).fn(), signals, expire, dispatch, winEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
 }
 
 const unescapeHtml = (s) => s.replace(/&(quot|#39|lt|gt|amp);/g, (_, e) => ({ quot: '"', '#39': "'", lt: '<', gt: '>', amp: '&' })[e]);
@@ -1154,4 +1161,204 @@ test('At a glance adds no requests: load, every timer and Refresh fetch the same
   assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas?force', '/api/workspace?force', '/api/pipeline?force'], 'Refresh');
   assert.equal(page.timers.length, 0, 'no new timers either');
   assert.ok(!/fetch\(/.test(html.slice(html.indexOf('// ---------- At a glance'), html.indexOf('async function refreshAll'))), 'the tile code fetches nothing');
+});
+
+// ---------- Panel order and the collapsible Workspace computer panel ----------
+const disclosure = (page) => ({
+  expanded: page.element('workspace-toggle').attributes['aria-expanded'],
+  body: !page.element('workspace-content').hidden,
+  diagnostics: !page.element('workspace-diagnostics').hidden,
+  button: !page.element('workspace-toggle').hidden,
+});
+const OPEN = { expanded: 'true', body: true, diagnostics: true, button: true };
+const CLOSED = { expanded: 'false', body: false, diagnostics: false, button: true };
+const metaText = (page) => unescapeHtml(page.element('workspace-meta').innerHTML.replace(/<[^>]+>/g, '')).trim();
+const toggleWorkspace = (page) => page.element('workspace-toggle').onclick();
+const memoryStorage = () => { const m = new Map(); return { m, getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)) }; };
+
+test('panels follow the At a glance tiles: quota cards, then Agent pipeline, Workspace computer and Computer diagnostics', () => {
+  const at = (marker) => { const i = html.indexOf(marker); assert.ok(i > 0, marker); return i; };
+  const order = ['<section class="overview" id="overview"', '<div id="banner">', '<div id="content">', '<div class="legend" id="legend"', 'id="pipeline"', 'id="workspace"', 'id="workspace-diagnostics"'].map(at);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  // The disclosure is a real button in the panel header that controls the body and the diagnostics.
+  const toggle = html.match(/<button[^>]* id="workspace-toggle"[^>]*>/)[0];
+  assert.match(toggle, /type="button"/);
+  assert.match(toggle, /aria-controls="workspace-content workspace-diagnostics"/);
+  assert.ok(at('id="workspace-title"') < at('id="workspace-toggle"') && at('id="workspace-toggle"') < at('<div id="workspace-content">'));
+});
+
+test('a healthy workspace collapses to a one-line All OK summary with uptime and reading age', async () => {
+  const page = await glancePage();
+  assert.deepEqual(disclosure(page), CLOSED);
+  assert.equal(metaText(page), '✓ All OK · up 2h 46m · checked just now');
+  assert.ok(page.element('workspace-meta').innerHTML.includes('<span class="healthy">✓ All OK</span>'));
+  assert.equal(page.element('workspace-toggle').innerHTML, '<span aria-hidden="true">▸</span> Show details');
+  assert.equal(page.element('workspace-error').hidden, true);
+  // The detail is still rendered, so opening it shows the latest reading at once.
+  assert.ok(page.element('workspace-content').innerHTML.includes('machine-metrics'));
+  assert.ok(page.element('workspace-diagnostics').innerHTML.includes('Computer diagnostics'));
+
+  toggleWorkspace(page);
+  assert.deepEqual(disclosure(page), OPEN);
+  assert.equal(metaText(page), 'HP laptop · up 2h 46m · checked just now');
+  assert.equal(page.element('workspace-toggle').innerHTML, '<span aria-hidden="true">▾</span> Hide details');
+});
+
+test('every warning or critical workspace condition opens the panel by default', async () => {
+  const cases = [
+    'workspace.diagnostics.healthChecks[0].state = "unhealthy"',
+    'workspace.services[1].state = "failed"',
+    'workspace.diagnostics.memoryLevel = "warning"',
+    'workspace.diagnostics.memoryLevel = "critical"',
+    'workspace.diagnostics.disks[0].usedPct = 96',
+    'workspace.autoUpdate.state = "failed"',
+    'workspace.autoUpdate.timerActive = false',
+    'workspace.internet.state = "offline"',
+    'workspace.diagnostics.backup.state = "failed"',
+  ];
+  for (const change of cases) {
+    const workspace = healthyWorkspace();
+    new Function('workspace', change)(workspace);
+    const page = await glancePage({ workspace });
+    assert.ok(JSON.parse(page.run('JSON.stringify(workspaceConditions(workspace))')).length, change);
+    assert.deepEqual(disclosure(page), OPEN, change);
+    assert.ok(metaText(page).startsWith('HP laptop · up'), change);
+  }
+});
+
+test('missing, failed, stale and unsupported readings never leave the panel collapsed without an explanation', async () => {
+  // Still loading: the body says so.
+  let resolve;
+  const loading = await glancePage({ hidden: (id) => id === 'workspace-toggle', // as in the markup
+    respond: (url) => (url.startsWith('/api/workspace') ? new Promise((r) => { resolve = r; }) : undefined) });
+  loading.tick();
+  assert.equal(loading.element('workspace-content').hidden, false);
+  assert.equal(loading.element('workspace-toggle').hidden, true, 'no toggle before there is anything to collapse');
+  resolve({ ok: true, json: async () => healthyWorkspace() });
+  await settle();
+  assert.deepEqual(disclosure(loading), CLOSED, 'collapses once a healthy reading arrives');
+
+  // No reading at all.
+  const failed = await glancePage({ respond: failWith('/api/workspace') });
+  assert.equal(failed.element('workspace-content').hidden, false);
+  assert.equal(failed.element('workspace-toggle').hidden, true);
+  assert.equal(metaText(failed), 'Unavailable');
+  assert.equal(failed.element('workspace-error').hidden, false);
+
+  // Not Linux.
+  const unsupported = await glancePage({ workspace: { supported: false } });
+  assert.equal(unsupported.element('workspace-content').hidden, false);
+  assert.ok(unsupported.element('workspace-content').innerHTML.includes('Computer monitoring is available on Linux.'));
+  assert.equal(unsupported.element('workspace-toggle').hidden, true);
+
+  // Over 90 s old: open by default, with the note.
+  const stale = await glancePage({ workspace: { ...healthyWorkspace(), generatedAt: NOW - 120_000 } });
+  assert.deepEqual(disclosure(stale), OPEN);
+  assert.equal(stale.element('workspace-error').hidden, false);
+
+  // An update fails after a healthy reading: open by default. If the owner closes it, the summary and the note still say so.
+  let fail = false;
+  const later = await glancePage({ respond: (url, init) => (fail ? failWith('/api/workspace')(url, init) : undefined) });
+  assert.deepEqual(disclosure(later), CLOSED);
+  fail = true;
+  await later.run('loadWorkspace()');
+  assert.deepEqual(disclosure(later), OPEN);
+  toggleWorkspace(later);
+  assert.deepEqual(disclosure(later), CLOSED);
+  assert.equal(later.element('workspace-error').hidden, false);
+  assert.ok(later.element('workspace-error').textContent.includes("Can't update computer status. Showing the last reading."));
+  assert.equal(metaText(later), '✓ All OK · up 2h 46m · checked just now');
+});
+
+test('the owner’s choice survives refreshes and the clock tick, but a new condition opens the panel again', async () => {
+  let workspace = healthyWorkspace();
+  const page = await glancePage({ respond: (url) => (url.startsWith('/api/workspace') ? { ok: true, json: async () => workspace } : undefined) });
+  assert.deepEqual(disclosure(page), CLOSED);
+  toggleWorkspace(page);
+  assert.deepEqual(disclosure(page), OPEN);
+  await page.run('loadWorkspace()');
+  page.tick();
+  await page.element('refresh').onclick();
+  assert.deepEqual(disclosure(page), OPEN, 'opened by the owner, it stays open while healthy');
+  toggleWorkspace(page);
+  assert.deepEqual(disclosure(page), CLOSED);
+
+  // A condition appears: it opens, even though the owner closed it.
+  workspace = healthyWorkspace();
+  workspace.power = { acOnline: false, batteries: [{ percent: 25, status: 'Discharging' }] };
+  await page.run('loadWorkspace()');
+  assert.deepEqual(disclosure(page), OPEN);
+  // The owner closes it again with the condition on screen; the same condition doesn't reopen it,
+  // even as its reading moves, and the summary names the count instead of All OK.
+  toggleWorkspace(page);
+  workspace = structuredClone(workspace);
+  workspace.power.batteries[0].percent = 24;
+  await page.run('loadWorkspace()');
+  page.tick();
+  assert.deepEqual(disclosure(page), CLOSED);
+  assert.equal(metaText(page), '⚠ 1 warning · up 2h 46m · checked just now');
+  assert.ok(page.element('workspace-meta').innerHTML.includes('<span class="warning">⚠ 1 warning</span>'));
+  // Getting worse is new: the battery falls to critical.
+  workspace = structuredClone(workspace);
+  workspace.power.batteries[0].percent = 8;
+  await page.run('loadWorkspace()');
+  assert.deepEqual(disclosure(page), OPEN);
+  // Once all is well again, the panel goes back to its compact default.
+  workspace = healthyWorkspace();
+  await page.run('loadWorkspace()');
+  assert.deepEqual(disclosure(page), CLOSED);
+});
+
+test('following a link to #workspace opens the panel, by click, by hashchange and on load', async () => {
+  const page = await glancePage();
+  assert.deepEqual(disclosure(page), CLOSED);
+  const link = { closest: (selector) => (selector === 'a[href="#workspace"]' ? link : null) };
+  page.click(link);
+  assert.deepEqual(disclosure(page), OPEN);
+  page.run('loadWorkspace()');
+  await settle();
+  assert.deepEqual(disclosure(page), OPEN, 'stays open after a refresh');
+
+  // Clicks elsewhere don't touch it.
+  toggleWorkspace(page);
+  page.click({ closest: () => null });
+  assert.deepEqual(disclosure(page), CLOSED);
+
+  page.location.hash = '#pipeline';
+  page.fire('hashchange');
+  assert.deepEqual(disclosure(page), CLOSED);
+  page.location.hash = '#workspace';
+  page.fire('hashchange');
+  assert.deepEqual(disclosure(page), OPEN);
+
+  assert.deepEqual(disclosure(await glancePage({ hash: '#workspace' })), OPEN);
+});
+
+test('the choice is remembered in localStorage when it works, and a throwing localStorage changes nothing', async () => {
+  const storage = memoryStorage();
+  const first = await glancePage({ storage });
+  toggleWorkspace(first);
+  assert.equal(storage.m.get('ai-quota-dashboard:workspace-details'), 'open');
+  assert.deepEqual(disclosure(await glancePage({ storage })), OPEN, 'a reload keeps it open');
+  toggleWorkspace(first);
+  assert.equal(storage.m.get('ai-quota-dashboard:workspace-details'), 'closed');
+  // A remembered close never hides the conditions found on load.
+  const workspace = healthyWorkspace();
+  workspace.diagnostics.memoryLevel = 'critical';
+  assert.deepEqual(disclosure(await glancePage({ storage, workspace })), OPEN);
+  // Following the link doesn't overwrite the remembered choice.
+  const linked = await glancePage({ storage, hash: '#workspace' });
+  assert.deepEqual(disclosure(linked), OPEN);
+  assert.equal(storage.m.get('ai-quota-dashboard:workspace-details'), 'closed');
+
+  for (const broken of [() => { throw new DOMException('denied', 'SecurityError'); },
+    { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } }]) {
+    const page = await glancePage({ storage: broken });
+    assert.deepEqual(disclosure(page), CLOSED);
+    assert.equal(metaText(page), '✓ All OK · up 2h 46m · checked just now');
+    toggleWorkspace(page);
+    assert.deepEqual(disclosure(page), OPEN);
+    toggleWorkspace(page);
+    assert.deepEqual(disclosure(page), CLOSED);
+  }
 });

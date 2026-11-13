@@ -68,6 +68,7 @@
   button:hover { border-color: var(--ink-muted); }
   button[aria-pressed="true"] { background: var(--hairline); }
   button:disabled { opacity: 0.5; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--fill); outline-offset: 2px; }
 
   .banner { border: 1px solid var(--border); border-left: 3px solid var(--critical); background: var(--surface);
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; color: var(--ink-2); }
@@ -128,8 +129,14 @@
   tr:last-child td { border-bottom: 0; }
   .table-scroll { overflow-x: auto; }
 
-  .workspace { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 24px; }
+  .workspace { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin: 28px 0 0; }
   .workspace-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+  #workspace .workspace-head { align-items: center; justify-content: flex-start; }
+  #workspace-meta { margin-left: auto; }
+  #workspace-meta .healthy { color: var(--healthy); }
+  #workspace-meta .warning { color: var(--warning-ink); }
+  #workspace-meta .critical { color: var(--critical-ink); }
+  .disclosure { padding: 4px 10px; font-size: 12.5px; white-space: nowrap; }
   .workspace h2 { margin: 0; font-size: 16px; font-weight: 650; }
   .workspace-meta, .workspace-note { color: var(--ink-muted); font-size: 12px; }
   .workspace-note { margin: 12px 0 0; }
@@ -195,6 +202,8 @@
   .event-title { font-size: 12px; overflow-wrap: anywhere; }
   .event-time { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-muted); }
   @media (max-width: 700px) {
+    #workspace-meta { order: 3; flex-basis: 100%; margin-left: 0; }
+    #workspace-toggle { margin-left: auto; }
     .machine-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 16px; }
     .diagnostics-grid { grid-template-columns: minmax(0, 1fr); }
   }
@@ -304,14 +313,6 @@
     <div class="glance"><h2><a href="#pipeline">Needs you</a></h2><div id="glance-attention"><p class="glance-note">Loading…</p></div></div>
     <div class="glance"><h2><a href="#workspace">Workspace</a></h2><div id="glance-workspace"><p class="glance-note">Checking…</p></div></div>
   </section>
-  <section class="workspace" id="workspace" aria-labelledby="workspace-title">
-    <div class="workspace-head">
-      <h2 id="workspace-title">Workspace computer</h2>
-      <div class="workspace-meta" id="workspace-meta">Checking laptop…</div>
-    </div>
-    <div id="workspace-content"><p class="workspace-note">Loading computer status…</p></div>
-    <p class="workspace-note" id="workspace-error" role="status" hidden></p>
-  </section>
   <div id="banner"></div>
   <div id="content"></div>
   <div class="legend" id="legend" hidden>
@@ -324,6 +325,15 @@
       <div class="workspace-meta" id="pipeline-meta">Loading…</div>
     </div>
     <div id="pipeline-content"><p class="workspace-note">Loading the pipeline overview…</p></div>
+  </section>
+  <section class="workspace" id="workspace" aria-labelledby="workspace-title">
+    <div class="workspace-head">
+      <h2 id="workspace-title">Workspace computer</h2>
+      <div class="workspace-meta" id="workspace-meta">Checking laptop…</div>
+      <button type="button" class="disclosure" id="workspace-toggle" aria-expanded="true" aria-controls="workspace-content workspace-diagnostics" hidden><span aria-hidden="true">▾</span> Hide details</button>
+    </div>
+    <div id="workspace-content"><p class="workspace-note">Loading computer status…</p></div>
+    <p class="workspace-note" id="workspace-error" role="status" hidden></p>
   </section>
   <section class="diagnostics" id="workspace-diagnostics" aria-label="Computer diagnostics" hidden></section>
 </main>
@@ -452,8 +462,54 @@
 
   const workspaceStale = () => workspaceError || (workspace != null && Date.now() - workspace.generatedAt > 90_000);
 
+  // "✓ All OK", or how many critical and warning conditions there are: the glance tile's lead and the collapsed panel's summary.
+  function workspaceLead(conditions) {
+    if (!conditions.length) return `<span class="healthy">${ICON.healthy} All OK</span>`;
+    const critical = conditions.filter((c) => c.level === 'critical').length, warnings = conditions.length - critical;
+    return `<span class="${critical ? 'critical' : 'warning'}">${[critical ? `${ICON.critical} ${critical} critical` : '', warnings ? `${ICON.warning} ${plural(warnings, 'warning')}` : ''].filter(Boolean).join(' · ')}</span>`;
+  }
+
+  // ---------- Workspace computer disclosure ----------
+  // A healthy reading collapses to the one-line summary. Any condition, or a reading that is old or failed, shows the detail.
+  // Once the owner opens or closes it, that choice holds through refreshes and clock ticks, except that a condition
+  // not on screen at the last render opens it again, so a new problem is never hidden.
+  const WORKSPACE_DETAILS_KEY = 'ai-quota-dashboard:workspace-details';
+  let workspaceChoice = savedWorkspaceChoice(); // true or false once the owner chose, else null
+  let workspaceOpen = true; // what the last render showed
+  let knownConditions = new Set(); // conditionKey()s at the last render
+
+  // localStorage can be missing or throw (private windows, blocked site data); the page then just forgets the choice.
+  function savedWorkspaceChoice() {
+    try {
+      const saved = localStorage.getItem(WORKSPACE_DETAILS_KEY);
+      return saved === 'open' ? true : saved === 'closed' ? false : null;
+    } catch { return null; }
+  }
+  function setWorkspaceChoice(open, remember = false) {
+    workspaceChoice = open;
+    if (remember) try { localStorage.setItem(WORKSPACE_DETAILS_KEY, open ? 'open' : 'closed'); } catch {}
+    renderWorkspace();
+  }
+  // Digits are dropped, so a reading that only moves (battery 25% → 24%) isn't a new condition. A change of level is.
+  const conditionKey = (c) => `${c.level} ${c.text.replace(/\d+/g, '#')}`;
+
+  function workspaceExpanded(conditions) {
+    const keys = new Set(conditions.map(conditionKey));
+    if (workspaceChoice === false && [...keys].some((k) => !knownConditions.has(k))) workspaceChoice = null;
+    knownConditions = keys;
+    if (!workspace?.supported) return true; // loading, unavailable or not Linux: the body holds the only explanation
+    return workspaceChoice ?? (conditions.length > 0 || workspaceStale());
+  }
+
   function renderWorkspace() {
     renderWorkspaceGlance();
+    const conditions = workspaceConditions(workspace);
+    workspaceOpen = workspaceExpanded(conditions);
+    const toggle = $('workspace-toggle');
+    toggle.hidden = !workspace?.supported;
+    toggle.setAttribute('aria-expanded', String(workspaceOpen));
+    toggle.innerHTML = workspaceOpen ? '<span aria-hidden="true">▾</span> Hide details' : '<span aria-hidden="true">▸</span> Show details';
+    $('workspace-content').hidden = !workspaceOpen;
     const stale = workspaceStale();
     $('workspace-error').hidden = !stale;
     $('workspace-error').className = 'workspace-note warning';
@@ -462,18 +518,19 @@
       : 'Computer readings are old. Waiting for an update…';
     if (!workspace) {
       if (workspaceError) {
-        $('workspace-meta').textContent = 'Unavailable';
+        $('workspace-meta').innerHTML = 'Unavailable';
         $('workspace-content').innerHTML = '';
       }
       return;
     }
     if (!workspace.supported) {
       $('workspace-diagnostics').hidden = true;
-      $('workspace-meta').textContent = '';
+      $('workspace-meta').innerHTML = '';
       $('workspace-content').innerHTML = '<p class="workspace-note">Computer monitoring is available on Linux.</p>';
       return;
     }
-    $('workspace-meta').textContent = `${workspace.model} · up ${fmtDur(workspace.uptimeSec)} · checked ${ago(workspace.generatedAt)}`;
+    const age = `up ${fmtDur(workspace.uptimeSec)} · checked ${ago(workspace.generatedAt)}`;
+    $('workspace-meta').innerHTML = workspaceOpen ? esc(`${workspace.model} · ${age}`) : `${workspaceLead(conditions)} · ${esc(age)}`;
     const battery = batteryOf(workspace);
     const ac = workspace.power.acOnline;
     const powerDetail = [ac === true ? 'Plugged in' : ac === false ? 'On battery' : 'Power source unknown', battery?.status].filter(Boolean).join(' · ');
@@ -506,7 +563,7 @@
       return `<li><div class="service-name">${esc(s.name)}</div><div class="service-state ${level}"><span class="health-dot" aria-hidden="true"></span>${esc(SERVICE_STATES[s.state] || s.state)}${failedCheck && s.state === 'running' ? ' · Check failed' : ''}</div>${checks}${restarts}</li>`;
     }).join('');
     $('workspace-content').innerHTML = `<div class="machine-metrics">${metrics.join('')}</div><ul class="services" aria-label="Services">${services}</ul>${renderAutoUpdate(workspace.autoUpdate)}`;
-    renderDiagnostics();
+    renderDiagnostics(workspaceOpen);
   }
 
   // deploy/'s update timer: one quiet row when all is well, text warnings when it failed or stopped.
@@ -553,10 +610,11 @@
       <div class="diagnostic-detail">${esc(range)} · ${failures} of ${samples.length} internet checks unsuccessful · since ${esc(fmtClock(first))}. Up to 30 minutes shown.</div>`;
   }
 
-  function renderDiagnostics() {
+  // The diagnostics stay rendered while the panel is collapsed, so opening it shows the latest reading at once.
+  function renderDiagnostics(open) {
     const target = $('workspace-diagnostics'), d = workspace?.diagnostics;
-    target.hidden = !workspace?.supported || !d;
-    if (target.hidden) return;
+    target.hidden = !workspace?.supported || !d || !open;
+    if (!workspace?.supported || !d) return;
     const history = workspace.history;
     const pressure = ['cpu', 'memory', 'io'].map((name) => {
       const value = d.pressure[name]?.some?.avg10;
@@ -896,13 +954,9 @@
       return;
     }
     const conditions = workspaceConditions(workspace);
-    const critical = conditions.filter((c) => c.level === 'critical').length, warnings = conditions.length - critical;
     const named = conditions.slice(0, 2).map((c) => `<span class="${c.level}">${ICON[c.level]} ${esc(c.text)}</span>`);
     if (conditions.length > 2) named.push(`+${conditions.length - 2} more`);
-    const summary = conditions.length
-      ? `<p class="glance-lead ${critical ? 'critical' : 'warning'}">${[critical ? `${ICON.critical} ${critical} critical` : '', warnings ? `${ICON.warning} ${plural(warnings, 'warning')}` : ''].filter(Boolean).join(' · ')}</p>
-        <p class="glance-detail">${named.join(' · ')}</p>`
-      : `<p class="glance-lead healthy">${ICON.healthy} All OK</p>`;
+    const summary = `<p class="glance-lead">${workspaceLead(conditions)}</p>${conditions.length ? `<p class="glance-detail">${named.join(' · ')}</p>` : ''}`;
     target.innerHTML = summary + (workspaceStale() ? glanceAge(workspace.generatedAt, workspaceError) : '');
   }
 
@@ -1208,6 +1262,12 @@
   document.addEventListener('pointerout', (e) => e.relatedTarget == null && hideTip());
 
   $('refresh').onclick = () => refreshAll(true);
+  $('workspace-toggle').onclick = () => setWorkspaceChoice(!workspaceOpen, true);
+  // Following the glance tile's Workspace link (or any link to #workspace) never lands on a collapsed panel.
+  // Clicking it when the URL already ends in #workspace fires no hashchange, so clicks are handled too.
+  document.addEventListener('click', (e) => { if (e.target.closest?.('a[href="#workspace"]')) setWorkspaceChoice(true); });
+  addEventListener('hashchange', () => location.hash === '#workspace' && setWorkspaceChoice(true));
+  if (location.hash === '#workspace') workspaceChoice = true;
   $('view').onclick = () => {
     tableView = !tableView;
     $('view').setAttribute('aria-pressed', tableView);
