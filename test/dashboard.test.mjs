@@ -1362,3 +1362,221 @@ test('the choice is remembered in localStorage when it works, and a throwing loc
     assert.deepEqual(disclosure(page), CLOSED);
   }
 });
+
+// ---------- The collapsible Agent pipeline panel ----------
+const pipelineDisclosure = (page) => ({
+  expanded: page.element('pipeline-toggle').attributes['aria-expanded'],
+  body: !page.element('pipeline-content').hidden,
+  button: !page.element('pipeline-toggle').hidden,
+});
+const PIPE_OPEN = { expanded: 'true', body: true, button: true };
+const PIPE_CLOSED = { expanded: 'false', body: false, button: true };
+const pipelineMeta = (page) => unescapeHtml(page.element('pipeline-meta').innerHTML.replace(/<[^>]+>/g, '')).trim();
+const togglePipeline = (page) => page.element('pipeline-toggle').onclick();
+const pipeItem = (kind, number, extra = {}) => ({ kind, repo: 'o/alpha', number, url: `https://github.com/o/alpha/issues/${number}`, title: `item ${number}`, action: 'Act', ...extra });
+// A repo with 2 running jobs, 3 queued issues and 4 PRs stacked into its umbrella.
+const busyRepo = (extra = {}) => ({
+  slug: 'o/alpha', url: 'https://github.com/o/alpha', available: true, defaultBranch: 'main', openPrCount: 0, attention: [],
+  issues: { queued: [11, 12, 13].map((n) => ({ number: n, title: `q${n}`, url: `https://github.com/o/alpha/issues/${n}`, state: 'queued', createdAt: new Date(NOW).toISOString() })) },
+  jobs: { active: ['j1', 'j2'].map((id) => ({ id, mode: 'implement', status: 'running', createdAt: new Date(NOW).toISOString(), stale: false })), recent: [] },
+  stackedPrs: [1, 2, 3, 4].map((n) => ({ number: n, title: `s${n}`, url: `https://github.com/o/alpha/pull/${n}`, mergedAt: new Date(NOW).toISOString() })),
+  ...extra,
+});
+const pipelineWith = (change) => { const p = pipelineOf([], {}); p.overview.repos = [busyRepo()]; change?.(p); return p; };
+const pipelineReply = (get) => (url) => (url.startsWith('/api/pipeline') ? { ok: true, json: async () => get() } : undefined);
+
+test('the Agent pipeline header has a Hide/Show details button that controls its body', () => {
+  const at = (marker) => { const i = html.indexOf(marker); assert.ok(i > 0, marker); return i; };
+  const toggle = html.match(/<button[^>]* id="pipeline-toggle"[^>]*>/)[0];
+  assert.match(toggle, /type="button"/);
+  assert.match(toggle, /aria-controls="pipeline-content"/);
+  assert.match(toggle, / hidden>/, 'hidden until there is a reading to collapse');
+  assert.ok(at('id="pipeline-title"') < at('id="pipeline-toggle"') && at('id="pipeline-toggle"') < at('<div id="pipeline-content">'));
+});
+
+test('a healthy pipeline collapses to one summary line built from its totals, and Show details opens it', async () => {
+  const page = await glancePage({ pipeline: pipelineWith() });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  assert.equal(pipelineMeta(page), '✓ Nothing needs you · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+  assert.ok(page.element('pipeline-meta').innerHTML.includes('<span class="healthy">✓ Nothing needs you</span>'));
+  assert.equal(page.element('pipeline-toggle').innerHTML, '<span aria-hidden="true">▸</span> Show details');
+  // The detail is still rendered, so opening it shows the latest reading at once.
+  assert.ok(page.element('pipeline-content').innerHTML.includes('Nothing needs you right now.'));
+
+  togglePipeline(page);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  assert.equal(pipelineMeta(page), '1 repo in scope · GitHub read 1m ago · refreshes every 5 min');
+  assert.equal(page.element('pipeline-toggle').innerHTML, '<span aria-hidden="true">▾</span> Hide details');
+
+  // Singular counts, and an empty scope.
+  const quiet = await glancePage();
+  assert.equal(pipelineMeta(quiet), '✓ Nothing needs you · 0 jobs running · 0 queued · 0 stacked in umbrellas');
+  const one = await glancePage({ pipeline: pipelineWith((p) => { p.overview.repos[0].jobs.active.pop(); }) });
+  assert.ok(pipelineMeta(one).includes('· 1 job running ·'));
+});
+
+test('any attention item or problem opens the pipeline panel on first render', async () => {
+  const cases = {
+    'an attention item': (p) => { p.overview.attention = [pipeItem('review', 5)]; },
+    'a failed update': (p) => { p.error = 'agentctl overview failed or timed out'; },
+    'GitHub unavailable': (p) => { p.overview.github = { available: false, errors: ['down'], truncated: [] }; },
+    'a truncated reading': (p) => { p.overview.github.truncated = ['repos: first 50 only']; },
+    'paused': (p) => { p.overview.paused = true; },
+    'not configured': (p) => { p.overview.configured = false; },
+    'a stale job': (p) => { p.overview.repos[0].jobs.active[0].stale = true; },
+    'a repo GitHub returned nothing for': (p) => { p.overview.repos[0].available = false; },
+  };
+  for (const [name, change] of Object.entries(cases)) {
+    const page = await glancePage({ pipeline: pipelineWith(change) });
+    assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN, name);
+    assert.ok(pipelineMeta(page).includes('repo in scope'), name);
+  }
+  // The server becomes unreachable after a good reading.
+  let fail = false;
+  const page = await glancePage({ respond: (url, init) => (fail ? failWith('/api/pipeline')(url, init) : pipelineReply(pipelineWith)(url, init)) });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  fail = true;
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  assert.ok(page.element('pipeline-content').innerHTML.includes('Can’t reach the dashboard server. Showing the last reading.'));
+  // Closed by the owner, the summary still names the problem.
+  togglePipeline(page);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  assert.equal(pipelineMeta(page), '✓ Nothing needs you · ⚠ can’t reach the dashboard server · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+});
+
+test('loading and unavailable pipeline readings always show the body, with no toggle', async () => {
+  let resolve;
+  const loading = await glancePage({ hidden: (id) => id === 'pipeline-toggle', // as in the markup
+    respond: (url) => (url.startsWith('/api/pipeline') ? new Promise((r) => { resolve = r; }) : undefined) });
+  loading.tick();
+  assert.equal(loading.element('pipeline-content').hidden, false);
+  assert.equal(loading.element('pipeline-toggle').hidden, true);
+  assert.equal(pipelineMeta(loading), 'Loading…');
+  resolve({ ok: true, json: async () => pipelineWith() });
+  await settle();
+  assert.deepEqual(pipelineDisclosure(loading), PIPE_CLOSED, 'collapses once a healthy reading arrives');
+
+  const failed = await glancePage({ respond: failWith('/api/pipeline') });
+  assert.equal(failed.element('pipeline-content').hidden, false);
+  assert.equal(failed.element('pipeline-toggle').hidden, true);
+  assert.equal(pipelineMeta(failed), 'Unavailable');
+  assert.ok(failed.element('pipeline-content').innerHTML.includes('Pipeline overview unavailable'));
+
+  const noOverview = await glancePage({ pipeline: { available: false, error: 'agentctl overview failed or timed out', overview: null } });
+  assert.equal(noOverview.element('pipeline-content').hidden, false);
+  assert.equal(noOverview.element('pipeline-toggle').hidden, true);
+  // A remembered close doesn't hide the explanation either.
+  const storage = memoryStorage();
+  storage.setItem('ai-quota-dashboard:pipeline-details', 'closed');
+  const closedButFailed = await glancePage({ storage, respond: failWith('/api/pipeline') });
+  assert.equal(closedButFailed.element('pipeline-content').hidden, false);
+});
+
+test('the owner’s pipeline choice survives refreshes and the clock tick, but a new attention item opens it again', async () => {
+  let pipeline = pipelineWith();
+  const page = await glancePage({ respond: pipelineReply(() => pipeline) });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  togglePipeline(page);
+  await page.run('loadPipeline()');
+  page.tick();
+  await page.element('refresh').onclick();
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN, 'opened by the owner, it stays open while healthy');
+  togglePipeline(page);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+
+  // An item appears: it opens, even though the owner closed it.
+  pipeline = pipelineWith((p) => { p.overview.attention = [pipeItem('decision', 14)]; });
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  // Closed again with the item on screen, the same item on the next reading keeps it closed, and the summary counts it.
+  togglePipeline(page);
+  pipeline = pipelineWith((p) => { p.overview.attention = [pipeItem('decision', 14, { title: 'reworded' })]; });
+  await page.run('loadPipeline()');
+  page.tick();
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  assert.equal(pipelineMeta(page), '1 item needs you · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+  assert.ok(page.element('pipeline-meta').innerHTML.includes('<span class="warning">1 item needs you</span>'));
+  // Another item is new, even of the same kind in the same repo; so is the same number in another repo.
+  pipeline = pipelineWith((p) => { p.overview.attention = [pipeItem('decision', 14), pipeItem('decision', 15, { urgent: true })]; });
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  togglePipeline(page);
+  assert.equal(pipelineMeta(page), '🔥 2 items need you · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+  pipeline = pipelineWith((p) => { p.overview.attention = [pipeItem('decision', 14), pipeItem('decision', 15), pipeItem('needs-human', 14, { repo: 'o/beta' })]; });
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  togglePipeline(page);
+  assert.ok(page.element('pipeline-meta').innerHTML.includes('<span class="critical">3 items need you</span>'));
+  // A new problem reopens it too.
+  pipeline = structuredClone(pipeline);
+  pipeline.overview.repos[0].jobs.active[1].stale = true;
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  togglePipeline(page);
+  assert.ok(pipelineMeta(page).includes('⚠ 1 job overdue'));
+  // Once nothing needs the owner, the panel goes back to its compact default.
+  pipeline = pipelineWith();
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+});
+
+test('following a link to #pipeline opens the panel, by click, by hashchange and on load', async () => {
+  const page = await glancePage({ pipeline: pipelineWith() });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  const link = { closest: (selector) => (selector === 'a[href="#pipeline"]' ? link : null) };
+  page.click(link);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  assert.deepEqual(disclosure(page), CLOSED, 'the Workspace panel is left alone');
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN, 'stays open after a refresh');
+
+  togglePipeline(page);
+  page.click({ closest: () => null });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  page.location.hash = '#workspace';
+  page.fire('hashchange');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  page.location.hash = '#pipeline';
+  page.fire('hashchange');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+
+  assert.deepEqual(pipelineDisclosure(await glancePage({ pipeline: pipelineWith(), hash: '#pipeline' })), PIPE_OPEN);
+});
+
+test('the pipeline choice is remembered under its own localStorage key, and a throwing localStorage changes nothing', async () => {
+  const storage = memoryStorage();
+  const first = await glancePage({ storage, pipeline: pipelineWith() });
+  togglePipeline(first);
+  assert.equal(storage.m.get('ai-quota-dashboard:pipeline-details'), 'open');
+  assert.equal(storage.m.has('ai-quota-dashboard:workspace-details'), false, 'the Workspace choice is separate');
+  const reloaded = await glancePage({ storage, pipeline: pipelineWith() });
+  assert.deepEqual(pipelineDisclosure(reloaded), PIPE_OPEN, 'a reload keeps it open');
+  assert.deepEqual(disclosure(reloaded), CLOSED);
+  togglePipeline(first);
+  assert.equal(storage.m.get('ai-quota-dashboard:pipeline-details'), 'closed');
+  assert.deepEqual(pipelineDisclosure(await glancePage({ storage, pipeline: pipelineWith() })), PIPE_CLOSED);
+  // A remembered close never hides the items found on load.
+  assert.deepEqual(pipelineDisclosure(await glancePage({ storage, pipeline: pipelineWith((p) => { p.overview.attention = [pipeItem('review', 3)]; }) })), PIPE_OPEN);
+  // Following the link doesn't overwrite the remembered choice.
+  assert.deepEqual(pipelineDisclosure(await glancePage({ storage, pipeline: pipelineWith(), hash: '#pipeline' })), PIPE_OPEN);
+  assert.equal(storage.m.get('ai-quota-dashboard:pipeline-details'), 'closed');
+
+  for (const broken of [() => { throw new DOMException('denied', 'SecurityError'); },
+    { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } }]) {
+    const page = await glancePage({ storage: broken, pipeline: pipelineWith() });
+    assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+    togglePipeline(page);
+    assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+    togglePipeline(page);
+    assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  }
+});
+
+test('the collapsed pipeline summary escapes problem text and never shows reading strings', async () => {
+  const page = await glancePage({ pipeline: pipelineWith((p) => { p.error = '<img src=x onerror=alert(1)>'; }) });
+  togglePipeline(page);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  assert.ok(!page.element('pipeline-meta').innerHTML.includes('<img'));
+  assert.equal(pipelineMeta(page), '✓ Nothing needs you · ⚠ last update failed · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+});
