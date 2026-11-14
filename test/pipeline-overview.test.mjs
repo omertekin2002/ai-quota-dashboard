@@ -107,7 +107,7 @@ async function page(pipelineResponse) {
   const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
   new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]).runInContext(context);
   await new Promise(setImmediate);
-  return { content: () => element('pipeline-content').innerHTML, meta: () => element('pipeline-meta').textContent, context, set: (r) => { response = r; } };
+  return { content: () => element('pipeline-content').innerHTML, meta: () => element('pipeline-meta').innerHTML, context, set: (r) => { response = r; } };
 }
 
 const now = Date.now();

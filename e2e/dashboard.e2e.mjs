@@ -1,6 +1,6 @@
 // Headless-Chromium checks of index.html against the real server, at phone and desktop width (see playwright.config.mjs).
 // test/dashboard.test.mjs runs the page script against stub elements; these cover what only a browser shows:
-// layout, focus, keyboard, tap, <details>, localStorage and following #workspace links.
+// layout, focus, keyboard, tap, <details>, localStorage and following #workspace and #pipeline links.
 //
 // The server is createDashboardServer() with fake collectors that read `dash.state`, so no provider, agentctl or /proc
 // reading happens. Any request that isn't to the test server is aborted and fails the test.
@@ -10,6 +10,7 @@ import { createDashboardServer } from '../server.mjs';
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const WORKSPACE_KEY = 'ai-quota-dashboard:workspace-details';
+const PIPELINE_KEY = 'ai-quota-dashboard:pipeline-details';
 
 // ---------- fake readings, relative to the real clock (the page uses it too) ----------
 function quotasOf({ claudeUsed = 20 } = {}) {
@@ -99,6 +100,15 @@ function pipelineOf() {
   };
 }
 
+// The same pipeline with nothing for the owner: no attention items and no decision waiting.
+function quietPipeline() {
+  const p = pipelineOf();
+  p.overview.attention = [];
+  p.overview.repos[0].attention = [];
+  p.overview.repos[0].issues.decision = [];
+  return p;
+}
+
 // ---------- fixtures ----------
 const test = base.extend({
   // A dashboard server on a free port, and helpers for the page under test.
@@ -153,7 +163,7 @@ const test = base.extend({
       await page.reload();
       await settled();
     }
-    const stored = () => page.evaluate((key) => localStorage.getItem(key), WORKSPACE_KEY);
+    const stored = (key = WORKSPACE_KEY) => page.evaluate((k) => localStorage.getItem(k), key);
 
     await use({ state, calls, logged, origin, open, refresh, reload, stored });
 
@@ -194,6 +204,20 @@ async function expectWorkspaceOpen(page, open) {
   }
 }
 
+const pipeline = (page) => ({
+  toggle: page.locator('#pipeline-toggle'),
+  content: page.locator('#pipeline-content'),
+  meta: page.locator('#pipeline-meta'),
+});
+async function expectPipelineOpen(page, open) {
+  const p = pipeline(page);
+  await expect(p.toggle).toBeVisible();
+  await expect(p.toggle).toHaveAttribute('aria-expanded', String(open));
+  await expect(p.toggle).toContainText(open ? 'Hide details' : 'Show details');
+  if (open) await expect(p.content).toBeVisible();
+  else await expect(p.content).toBeHidden();
+}
+
 // ---------- 1. healthy ----------
 test('healthy: quota cards under At a glance, a one-line All OK workspace, no sideways scroll', async ({ page, dash }) => {
   await dash.open();
@@ -218,7 +242,8 @@ test('healthy: quota cards under At a glance, a one-line All OK workspace, no si
   await expectWorkspaceOpen(page, false);
   await expect(workspace(page).meta).toContainText('✓ All OK · up 3d');
 
-  // Agent pipeline: the repo with something for the owner starts expanded.
+  // Agent pipeline: something needs the owner, so the panel is open, and the repo with it starts expanded.
+  await expectPipelineOpen(page, true);
   const repo = page.locator('#pipeline details.repo');
   await expect(repo).toHaveCount(1);
   await expect(repo).toHaveAttribute('open', '');
@@ -243,6 +268,91 @@ test('healthy: a repo closed in the Agent pipeline stays closed through a refres
   await expect(repo).not.toHaveAttribute('open');
   await press(repo.locator('summary'), isMobile);
   await expect(repo.locator('.repo-body')).toBeVisible();
+  await expectNoSideScroll(page);
+});
+
+// ---------- 1b. Agent pipeline disclosure ----------
+test('pipeline, nothing needs you: one summary line, Show details by keyboard, no sideways scroll either way', async ({ page, dash }) => {
+  dash.state.pipeline = quietPipeline();
+  await dash.open();
+  await expect(page.locator('#glance-attention')).toHaveText('✓ Nothing needs you');
+  await expectPipelineOpen(page, false);
+  await expect(pipeline(page).meta).toHaveText('✓ Nothing needs you · 0 jobs running · 1 queued · 0 stacked in umbrellas');
+  await expect(page.locator('#pipeline details.repo')).toBeHidden();
+  await expect(page.locator('#pipeline .pipeline-totals')).toBeHidden();
+  await expect(page.locator('#pipeline h3')).toHaveCount(2);
+  for (const heading of await page.locator('#pipeline h3').all()) await expect(heading).toBeHidden();
+  // The header is one line plus the summary: shorter than any panel with its body showing.
+  const collapsed = (await page.locator('#pipeline').boundingBox()).height;
+  expect(collapsed).toBeLessThan(140);
+  await expectNoSideScroll(page);
+
+  // Keyboard: the toggle is a real button, and its state is announced through aria-expanded.
+  await pipeline(page).toggle.focus();
+  await page.keyboard.press('Enter');
+  await expectPipelineOpen(page, true);
+  await expect(pipeline(page).toggle).toBeFocused();
+  await expect(pipeline(page).meta).toContainText('1 repo in scope');
+  await expect(page.locator('#pipeline details.repo')).toBeVisible();
+  await expect(page.locator('#pipeline')).toContainText('Nothing needs you right now.');
+  expect(await dash.stored(PIPELINE_KEY)).toBe('open');
+  await expectNoSideScroll(page);
+  await page.keyboard.press('Space');
+  await expectPipelineOpen(page, false);
+  expect(await dash.stored(PIPELINE_KEY)).toBe('closed');
+  expect(await dash.stored(WORKSPACE_KEY), 'the Workspace choice is separate').toBeNull();
+});
+
+test('pipeline: the Show/Hide choice survives a reload, and a new attention item reopens a remembered close', async ({ page, dash }) => {
+  dash.state.pipeline = quietPipeline();
+  await dash.open();
+  await expectPipelineOpen(page, false);
+  await pipeline(page).toggle.click();
+  await expectPipelineOpen(page, true);
+  await dash.reload();
+  await expectPipelineOpen(page, true);
+  await pipeline(page).toggle.click();
+  await expectPipelineOpen(page, false);
+  await dash.reload();
+  await expectPipelineOpen(page, false);
+
+  // A decision arrives: the remembered close doesn't hide it.
+  dash.state.pipeline = pipelineOf();
+  await dash.refresh();
+  await expectPipelineOpen(page, true);
+  await expect(page.locator('#pipeline')).toContainText('Decisions to answer (1)');
+  // Closed with the item on screen, the same item keeps it closed, and the summary counts it.
+  await pipeline(page).toggle.click();
+  await expectPipelineOpen(page, false);
+  await dash.refresh();
+  await expectPipelineOpen(page, false);
+  await expect(pipeline(page).meta).toContainText('1 item needs you');
+  await expectNoSideScroll(page);
+  // After a reload the item is new to the page again.
+  await dash.reload();
+  await expectPipelineOpen(page, true);
+  expect(await dash.stored(PIPELINE_KEY)).toBe('closed');
+});
+
+test('the glance tile’s Needs you link opens a collapsed pipeline panel, also when the URL already ends in #pipeline', async ({ page, dash, isMobile }) => {
+  dash.state.pipeline = quietPipeline();
+  await dash.open();
+  await expectPipelineOpen(page, false);
+  const link = page.locator('#overview a[href="#pipeline"]');
+  await press(link, isMobile);
+  await expectPipelineOpen(page, true);
+  await expect(page).toHaveURL(/#pipeline$/);
+  await expect(page.locator('#pipeline-title')).toBeInViewport();
+
+  await pipeline(page).toggle.click();
+  await expectPipelineOpen(page, false);
+  await press(link, isMobile);
+  await expectPipelineOpen(page, true);
+  expect(await dash.stored(PIPELINE_KEY)).toBe('closed');
+
+  await page.goto('about:blank');
+  await dash.open('#pipeline');
+  await expectPipelineOpen(page, true);
   await expectNoSideScroll(page);
 });
 
