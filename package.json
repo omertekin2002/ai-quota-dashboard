@@ -6,9 +6,13 @@
   "scripts": {
     "start": "node server.mjs",
     "json": "node server.mjs --json",
-    "test": "node --test"
+    "test": "node --test",
+    "test:browser": "playwright test"
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
   }
 }

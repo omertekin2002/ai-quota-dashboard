@@ -68,6 +68,7 @@
   button:hover { border-color: var(--ink-muted); }
   button[aria-pressed="true"] { background: var(--hairline); }
   button:disabled { opacity: 0.5; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--fill); outline-offset: 2px; }
 
   .banner { border: 1px solid var(--border); border-left: 3px solid var(--critical); background: var(--surface);
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; color: var(--ink-2); }
@@ -128,8 +129,14 @@
   tr:last-child td { border-bottom: 0; }
   .table-scroll { overflow-x: auto; }
 
-  .workspace { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 24px; }
+  .workspace { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin: 28px 0 0; }
   .workspace-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+  #workspace .workspace-head, #pipeline .workspace-head { align-items: center; justify-content: flex-start; }
+  #workspace-meta, #pipeline-meta { margin-left: auto; }
+  #workspace-meta .healthy, #pipeline-meta .healthy { color: var(--healthy); }
+  #workspace-meta .warning, #pipeline-meta .warning { color: var(--warning-ink); }
+  #workspace-meta .critical, #pipeline-meta .critical { color: var(--critical-ink); }
+  .disclosure { padding: 4px 10px; font-size: 12.5px; white-space: nowrap; }
   .workspace h2 { margin: 0; font-size: 16px; font-weight: 650; }
   .workspace-meta, .workspace-note { color: var(--ink-muted); font-size: 12px; }
   .workspace-note { margin: 12px 0 0; }
@@ -195,6 +202,8 @@
   .event-title { font-size: 12px; overflow-wrap: anywhere; }
   .event-time { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-muted); }
   @media (max-width: 700px) {
+    #workspace-meta, #pipeline-meta { order: 3; flex-basis: 100%; margin-left: 0; }
+    #workspace-toggle, #pipeline-toggle { margin-left: auto; }
     .machine-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 16px; }
     .diagnostics-grid { grid-template-columns: minmax(0, 1fr); }
   }
@@ -304,14 +313,6 @@
     <div class="glance"><h2><a href="#pipeline">Needs you</a></h2><div id="glance-attention"><p class="glance-note">Loading…</p></div></div>
     <div class="glance"><h2><a href="#workspace">Workspace</a></h2><div id="glance-workspace"><p class="glance-note">Checking…</p></div></div>
   </section>
-  <section class="workspace" id="workspace" aria-labelledby="workspace-title">
-    <div class="workspace-head">
-      <h2 id="workspace-title">Workspace computer</h2>
-      <div class="workspace-meta" id="workspace-meta">Checking laptop…</div>
-    </div>
-    <div id="workspace-content"><p class="workspace-note">Loading computer status…</p></div>
-    <p class="workspace-note" id="workspace-error" role="status" hidden></p>
-  </section>
   <div id="banner"></div>
   <div id="content"></div>
   <div class="legend" id="legend" hidden>
@@ -322,8 +323,18 @@
     <div class="workspace-head">
       <h2 id="pipeline-title">Agent pipeline</h2>
       <div class="workspace-meta" id="pipeline-meta">Loading…</div>
+      <button type="button" class="disclosure" id="pipeline-toggle" aria-expanded="true" aria-controls="pipeline-content" hidden><span aria-hidden="true">▾</span> Hide details</button>
     </div>
     <div id="pipeline-content"><p class="workspace-note">Loading the pipeline overview…</p></div>
+  </section>
+  <section class="workspace" id="workspace" aria-labelledby="workspace-title">
+    <div class="workspace-head">
+      <h2 id="workspace-title">Workspace computer</h2>
+      <div class="workspace-meta" id="workspace-meta">Checking laptop…</div>
+      <button type="button" class="disclosure" id="workspace-toggle" aria-expanded="true" aria-controls="workspace-content workspace-diagnostics" hidden><span aria-hidden="true">▾</span> Hide details</button>
+    </div>
+    <div id="workspace-content"><p class="workspace-note">Loading computer status…</p></div>
+    <p class="workspace-note" id="workspace-error" role="status" hidden></p>
   </section>
   <section class="diagnostics" id="workspace-diagnostics" aria-label="Computer diagnostics" hidden></section>
 </main>
@@ -452,8 +463,70 @@
 
   const workspaceStale = () => workspaceError || (workspace != null && Date.now() - workspace.generatedAt > 90_000);
 
+  // "✓ All OK", or how many critical and warning conditions there are: the glance tile's lead and the collapsed panel's summary.
+  function workspaceLead(conditions) {
+    if (!conditions.length) return `<span class="healthy">${ICON.healthy} All OK</span>`;
+    const critical = conditions.filter((c) => c.level === 'critical').length, warnings = conditions.length - critical;
+    return `<span class="${critical ? 'critical' : 'warning'}">${[critical ? `${ICON.critical} ${critical} critical` : '', warnings ? `${ICON.warning} ${plural(warnings, 'warning')}` : ''].filter(Boolean).join(' · ')}</span>`;
+  }
+
+  // ---------- collapsible panels: the Workspace computer and the Agent pipeline share these rules ----------
+  // A healthy reading collapses a panel to a one-line summary in its header; anything worth a look shows the detail.
+  // Once the owner opens or closes it, that choice holds through refreshes and clock ticks, and across reloads when
+  // localStorage works, except that a problem not on screen at the last render opens it again, so a new one is never
+  // hidden. Following a link to the panel opens it for this visit without overwriting the remembered choice.
+  function collapsiblePanel({ storageKey, hash, toggle, render }) {
+    const panel = { choice: null, open: true, known: new Set() }; // choice: true or false once the owner chose; open: the last render
+    // localStorage can be missing or throw (private windows, blocked site data); the page then just forgets the choice.
+    try {
+      const saved = localStorage.getItem(storageKey);
+      panel.choice = saved === 'open' ? true : saved === 'closed' ? false : null;
+    } catch {}
+    panel.set = (open, remember = false) => {
+      panel.choice = open;
+      if (remember) try { localStorage.setItem(storageKey, open ? 'open' : 'closed'); } catch {}
+      render();
+    };
+    // `problems`: one key per thing worth a look in this reading. `byDefault`: whether to open while the owner hasn't chosen.
+    panel.expanded = (problems, byDefault) => {
+      const keys = new Set(problems);
+      if (panel.choice === false && [...keys].some((k) => !panel.known.has(k))) panel.choice = null;
+      panel.known = keys;
+      return panel.choice ?? byDefault;
+    };
+    // Draws the button for what the last expanded() decided; `available` false hides it (nothing to collapse yet).
+    panel.show = (open, available, content) => {
+      panel.open = open;
+      const button = $(toggle);
+      button.hidden = !available;
+      button.setAttribute('aria-expanded', String(open));
+      button.innerHTML = open ? '<span aria-hidden="true">▾</span> Hide details' : '<span aria-hidden="true">▸</span> Show details';
+      $(content).hidden = !open;
+    };
+    $(toggle).onclick = () => panel.set(!panel.open, true);
+    // Clicking a link when the URL already ends in its hash fires no hashchange, so clicks are handled too.
+    document.addEventListener('click', (e) => { if (e.target.closest?.(`a[href="${hash}"]`)) panel.set(true); });
+    addEventListener('hashchange', () => location.hash === hash && panel.set(true));
+    if (location.hash === hash) panel.choice = true;
+    return panel;
+  }
+
+  // ---------- Workspace computer disclosure ----------
+  // Any condition, or a reading that is old or failed, shows the detail. Only a condition not on screen before reopens it.
+  const workspacePanel = collapsiblePanel({ storageKey: 'ai-quota-dashboard:workspace-details', hash: '#workspace', toggle: 'workspace-toggle', render: () => renderWorkspace() });
+  // Digits are dropped, so a reading that only moves (battery 25% → 24%) isn't a new condition. A change of level is.
+  const conditionKey = (c) => `${c.level} ${c.text.replace(/\d+/g, '#')}`;
+
+  function workspaceExpanded(conditions) {
+    const open = workspacePanel.expanded(conditions.map(conditionKey), conditions.length > 0 || workspaceStale());
+    return workspace?.supported ? open : true; // loading, unavailable or not Linux: the body holds the only explanation
+  }
+
   function renderWorkspace() {
     renderWorkspaceGlance();
+    const conditions = workspaceConditions(workspace);
+    const workspaceOpen = workspaceExpanded(conditions);
+    workspacePanel.show(workspaceOpen, !!workspace?.supported, 'workspace-content');
     const stale = workspaceStale();
     $('workspace-error').hidden = !stale;
     $('workspace-error').className = 'workspace-note warning';
@@ -462,18 +535,19 @@
       : 'Computer readings are old. Waiting for an update…';
     if (!workspace) {
       if (workspaceError) {
-        $('workspace-meta').textContent = 'Unavailable';
+        $('workspace-meta').innerHTML = 'Unavailable';
         $('workspace-content').innerHTML = '';
       }
       return;
     }
     if (!workspace.supported) {
       $('workspace-diagnostics').hidden = true;
-      $('workspace-meta').textContent = '';
+      $('workspace-meta').innerHTML = '';
       $('workspace-content').innerHTML = '<p class="workspace-note">Computer monitoring is available on Linux.</p>';
       return;
     }
-    $('workspace-meta').textContent = `${workspace.model} · up ${fmtDur(workspace.uptimeSec)} · checked ${ago(workspace.generatedAt)}`;
+    const age = `up ${fmtDur(workspace.uptimeSec)} · checked ${ago(workspace.generatedAt)}`;
+    $('workspace-meta').innerHTML = workspaceOpen ? esc(`${workspace.model} · ${age}`) : `${workspaceLead(conditions)} · ${esc(age)}`;
     const battery = batteryOf(workspace);
     const ac = workspace.power.acOnline;
     const powerDetail = [ac === true ? 'Plugged in' : ac === false ? 'On battery' : 'Power source unknown', battery?.status].filter(Boolean).join(' · ');
@@ -506,7 +580,7 @@
       return `<li><div class="service-name">${esc(s.name)}</div><div class="service-state ${level}"><span class="health-dot" aria-hidden="true"></span>${esc(SERVICE_STATES[s.state] || s.state)}${failedCheck && s.state === 'running' ? ' · Check failed' : ''}</div>${checks}${restarts}</li>`;
     }).join('');
     $('workspace-content').innerHTML = `<div class="machine-metrics">${metrics.join('')}</div><ul class="services" aria-label="Services">${services}</ul>${renderAutoUpdate(workspace.autoUpdate)}`;
-    renderDiagnostics();
+    renderDiagnostics(workspaceOpen);
   }
 
   // deploy/'s update timer: one quiet row when all is well, text warnings when it failed or stopped.
@@ -553,10 +627,11 @@
       <div class="diagnostic-detail">${esc(range)} · ${failures} of ${samples.length} internet checks unsuccessful · since ${esc(fmtClock(first))}. Up to 30 minutes shown.</div>`;
   }
 
-  function renderDiagnostics() {
+  // The diagnostics stay rendered while the panel is collapsed, so opening it shows the latest reading at once.
+  function renderDiagnostics(open) {
     const target = $('workspace-diagnostics'), d = workspace?.diagnostics;
-    target.hidden = !workspace?.supported || !d;
-    if (target.hidden) return;
+    target.hidden = !workspace?.supported || !d || !open;
+    if (!workspace?.supported || !d) return;
     const history = workspace.history;
     const pressure = ['cpu', 'memory', 'io'].map((name) => {
       const value = d.pressure[name]?.some?.avg10;
@@ -770,17 +845,63 @@
       <div class="repo-body"><div class="repo-grid"><div>${left}${jobsHtml}</div><div>${right}</div></div><div class="pipe-links">${links.join('<span aria-hidden="true">·</span>')}</div></div></details>`;
   }
 
+  // ---------- Agent pipeline disclosure ----------
+  // Collapsed only while the reading is healthy: nothing needs the owner and nothing below is a problem. Each attention
+  // item and problem has a key, so the same ones on the next reading don't reopen a panel the owner closed; a new one does.
+  const pipelinePanel = collapsiblePanel({ storageKey: 'ai-quota-dashboard:pipeline-details', hash: '#pipeline', toggle: 'pipeline-toggle', render: () => renderPipeline() });
+
+  // Everything in a loaded reading worth a look, each with a short label for the collapsed summary.
+  function pipelineProblems(p, o) {
+    const repos = Array.isArray(o.repos) ? o.repos : [];
+    const problems = [];
+    if (pipelineError) problems.push({ key: 'unreachable', text: 'can’t reach the dashboard server' });
+    else if (p.error) problems.push({ key: 'update-failed', text: 'last update failed' });
+    if (o.paused) problems.push({ key: 'paused', text: 'paused' });
+    if (o.configured === false) problems.push({ key: 'unconfigured', text: 'not configured' });
+    if (o.github && !o.github.available) problems.push({ key: 'github', text: 'GitHub unavailable' });
+    if (o.github?.truncated?.length) problems.push({ key: 'truncated', text: 'partial reading' });
+    const unreadable = repos.filter((r) => r.available === false);
+    if (unreadable.length && o.github?.available !== false) problems.push({ keys: unreadable.map((r) => `repo-unavailable ${r.slug}`), text: `GitHub data unavailable for ${plural(unreadable.length, 'repo')}` });
+    const stale = repos.flatMap((r) => (r.jobs?.active || []).filter((j) => j.stale));
+    if (stale.length) problems.push({ keys: stale.map((j) => `stale-job ${j.id}`), text: `${plural(stale.length, 'job')} overdue` });
+    return problems;
+  }
+  const attentionKey = (a) => `attention ${a.kind} ${a.repo} ${a.number}`;
+  // critical when something blocks on the owner, warning for a decision, else no level: the glance tile's rule.
+  function attentionLevel(attention) {
+    const levels = attention.map((a) => ATTENTION[a.kind]?.level);
+    return levels.includes('critical') ? 'critical' : levels.includes('warning') ? 'warning' : '';
+  }
+  // "✓ Nothing needs you · 2 jobs running · 3 queued · 4 stacked in umbrellas", with what needs the owner or is wrong first.
+  function pipelineSummary(repos, attention, problems) {
+    const urgent = attention.some((a) => a.urgent);
+    const lead = attention.length
+      ? `<span class="${attentionLevel(attention)}">${urgent ? '🔥 ' : ''}${esc(plural(attention.length, 'item needs you', 'items need you'))}</span>`
+      : `<span class="healthy">${ICON.healthy} Nothing needs you</span>`;
+    const issues = (k) => repos.reduce((sum, r) => sum + (r.issues?.[k]?.length || 0), 0);
+    const jobs = repos.reduce((s, r) => s + (r.jobs?.active?.length || 0), 0), stacked = repos.reduce((s, r) => s + (r.stackedPrs?.length || 0), 0);
+    return [lead, ...problems.map((x) => `<span class="warning">${ICON.warning} ${esc(x.text)}</span>`),
+      esc(`${plural(jobs, 'job')} running`), esc(`${issues('queued')} queued`), esc(`${stacked} stacked in umbrellas`)].join(' · ');
+  }
+
   function renderPipeline() {
     renderAttentionGlance();
     const p = pipeline, o = p?.overview;
     if (!p || !o) {
-      $('pipeline-meta').textContent = pipelineError || p ? 'Unavailable' : 'Loading…';
+      pipelinePanel.show(true, false, 'pipeline-content'); // loading or unavailable: the body holds the only explanation
+      $('pipeline-meta').innerHTML = pipelineError || p ? 'Unavailable' : 'Loading…';
       if (pipelineError || p) $('pipeline-content').innerHTML = `<p class="workspace-note warning">Pipeline overview unavailable${pipelineError ? ' (can’t reach the dashboard server)' : p?.error ? ` (${esc(p.error)})` : ''}. Retrying every minute.</p>`;
       return;
     }
     const repos = Array.isArray(o.repos) ? o.repos : [], attention = Array.isArray(o.attention) ? o.attention : [];
+    const problems = pipelineProblems(p, o);
+    const keys = [...attention.map(attentionKey), ...problems.flatMap((x) => x.keys || [x.key])];
+    const open = pipelinePanel.expanded(keys, keys.length > 0);
+    pipelinePanel.show(open, true, 'pipeline-content');
     const days = o.windowDays || 7;
-    $('pipeline-meta').textContent = `${plural(repos.length, 'repo')} in scope · GitHub read ${p.fetchedAt ? ago(p.fetchedAt) : 'at an unknown time'} · refreshes every ${Math.round((p.refreshMs || 300_000) / 60_000)} min${p.refreshing ? ' · updating…' : ''}`;
+    $('pipeline-meta').innerHTML = open
+      ? esc(`${plural(repos.length, 'repo')} in scope · GitHub read ${p.fetchedAt ? ago(p.fetchedAt) : 'at an unknown time'} · refreshes every ${Math.round((p.refreshMs || 300_000) / 60_000)} min${p.refreshing ? ' · updating…' : ''}`)
+      : pipelineSummary(repos, attention, problems);
     const notes = [];
     if (pipelineError) notes.push('Can’t reach the dashboard server. Showing the last reading.');
     else if (p.error) notes.push(`The last update failed (${p.error}). Showing the reading from ${ago(p.fetchedAt)}.`);
@@ -874,7 +995,7 @@
     const other = attention.filter((a) => !ATTENTION[a.kind]).length;
     const urgent = attention.filter((a) => a.urgent).length;
     const parts = [...kinds.map(([meta, n]) => plural(n, ...meta.count)), other ? `${other} other` : '', urgent ? `🔥 ${urgent} urgent` : ''].filter(Boolean);
-    const level = kinds.some(([meta]) => meta.level === 'critical') ? 'critical' : kinds.some(([meta]) => meta.level === 'warning') ? 'warning' : '';
+    const level = attentionLevel(attention);
     const summary = attention.length
       ? `<p class="glance-lead ${level}">${urgent ? '🔥 ' : ''}${plural(attention.length, 'item needs you', 'items need you')}</p><p class="glance-detail">${esc(parts.join(' · '))}</p>`
       : `<p class="glance-lead healthy">${ICON.healthy} Nothing needs you</p>`;
@@ -896,13 +1017,9 @@
       return;
     }
     const conditions = workspaceConditions(workspace);
-    const critical = conditions.filter((c) => c.level === 'critical').length, warnings = conditions.length - critical;
     const named = conditions.slice(0, 2).map((c) => `<span class="${c.level}">${ICON[c.level]} ${esc(c.text)}</span>`);
     if (conditions.length > 2) named.push(`+${conditions.length - 2} more`);
-    const summary = conditions.length
-      ? `<p class="glance-lead ${critical ? 'critical' : 'warning'}">${[critical ? `${ICON.critical} ${critical} critical` : '', warnings ? `${ICON.warning} ${plural(warnings, 'warning')}` : ''].filter(Boolean).join(' · ')}</p>
-        <p class="glance-detail">${named.join(' · ')}</p>`
-      : `<p class="glance-lead healthy">${ICON.healthy} All OK</p>`;
+    const summary = `<p class="glance-lead">${workspaceLead(conditions)}</p>${conditions.length ? `<p class="glance-detail">${named.join(' · ')}</p>` : ''}`;
     target.innerHTML = summary + (workspaceStale() ? glanceAge(workspace.generatedAt, workspaceError) : '');
   }
 

@@ -15,12 +15,14 @@ const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
 // `setInterval` callbacks are kept in `intervals` the same way; `tick()` fires the 15-second clock update.
 // `document.elementFromPoint` answers null (the pointer is over nothing) until a test replaces it.
 // `media.fine` is what `matchMedia('(hover: hover) and (pointer: fine)')` answers: a mouse or trackpad.
-async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond, abortSignalTimeout = true } = {}) {
+// `hash` is the page URL's fragment at load; `location.hash` can change later, and `fire('hashchange')` announces it.
+// `storage` is the page's `localStorage` (none by default, as in a vm), e.g. a Map-backed stub or one that throws.
+async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond, abortSignalTimeout = true, hash = '', storage } = {}) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
       elements.set(id, {
-        innerHTML: '', textContent: '', hidden: hidden(id), style: {}, setAttribute() {},
+        innerHTML: '', textContent: '', hidden: hidden(id), style: {}, attributes: {}, setAttribute(name, value) { this.attributes[name] = String(value); },
         getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 0, width: 200, height: 100 }),
         querySelectorAll(selector) { return selector === '.win' ? winElements(this.innerHTML) : []; },
       });
@@ -40,6 +42,8 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
     });
   }
   const listeners = {};
+  const windowListeners = {};
+  const location = { hash };
   const timeouts = [];
   const timers = []; // { fn, ms } for each setTimeout
   const intervals = []; // { fn, ms } for each setInterval
@@ -65,7 +69,9 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
     setInterval: (fn, ms) => { intervals.push({ fn, ms }); }, innerWidth: 1280, innerHeight: 800,
     matchMedia: (query) => ({ matches: query === '(hover: hover) and (pointer: fine)' && media.fine }),
     setTimeout: (fn, ms) => { timeouts.push(ms); timers.push({ fn, ms }); return timeouts.length; },
+    location, addEventListener: (type, fn) => { (windowListeners[type] ||= []).push(fn); },
   };
+  if (storage !== undefined) Object.defineProperty(globals, 'localStorage', { get: () => (typeof storage === 'function' ? storage() : storage) });
   if (now != null) {
     globals.Date = class extends Date {
       constructor(...args) { if (args.length) super(...args); else super(now); }
@@ -90,7 +96,8 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   };
   const click = (el) => dispatch('click', { target: el });
   const press = (el, key, fields = {}) => dispatch('keydown', { target: el, key, ...fields });
-  return { context, document, element, media, listeners, timeouts, timers, intervals, tick: () => intervals.find((i) => i.ms === 15_000).fn(), signals, expire, dispatch, winEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
+  const fire = (type) => { for (const fn of windowListeners[type] || []) fn({ type }); };
+  return { context, document, element, media, listeners, location, fire, timeouts, timers, intervals, tick: () => intervals.find((i) => i.ms === 15_000).fn(), signals, expire, dispatch, winEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
 }
 
 const unescapeHtml = (s) => s.replace(/&(quot|#39|lt|gt|amp);/g, (_, e) => ({ quot: '"', '#39': "'", lt: '<', gt: '>', amp: '&' })[e]);
@@ -1154,4 +1161,422 @@ test('At a glance adds no requests: load, every timer and Refresh fetch the same
   assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas?force', '/api/workspace?force', '/api/pipeline?force'], 'Refresh');
   assert.equal(page.timers.length, 0, 'no new timers either');
   assert.ok(!/fetch\(/.test(html.slice(html.indexOf('// ---------- At a glance'), html.indexOf('async function refreshAll'))), 'the tile code fetches nothing');
+});
+
+// ---------- Panel order and the collapsible Workspace computer panel ----------
+const disclosure = (page) => ({
+  expanded: page.element('workspace-toggle').attributes['aria-expanded'],
+  body: !page.element('workspace-content').hidden,
+  diagnostics: !page.element('workspace-diagnostics').hidden,
+  button: !page.element('workspace-toggle').hidden,
+});
+const OPEN = { expanded: 'true', body: true, diagnostics: true, button: true };
+const CLOSED = { expanded: 'false', body: false, diagnostics: false, button: true };
+const metaText = (page) => unescapeHtml(page.element('workspace-meta').innerHTML.replace(/<[^>]+>/g, '')).trim();
+const toggleWorkspace = (page) => page.element('workspace-toggle').onclick();
+const memoryStorage = () => { const m = new Map(); return { m, getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)) }; };
+
+test('panels follow the At a glance tiles: quota cards, then Agent pipeline, Workspace computer and Computer diagnostics', () => {
+  const at = (marker) => { const i = html.indexOf(marker); assert.ok(i > 0, marker); return i; };
+  const order = ['<section class="overview" id="overview"', '<div id="banner">', '<div id="content">', '<div class="legend" id="legend"', 'id="pipeline"', 'id="workspace"', 'id="workspace-diagnostics"'].map(at);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  // The disclosure is a real button in the panel header that controls the body and the diagnostics.
+  const toggle = html.match(/<button[^>]* id="workspace-toggle"[^>]*>/)[0];
+  assert.match(toggle, /type="button"/);
+  assert.match(toggle, /aria-controls="workspace-content workspace-diagnostics"/);
+  assert.ok(at('id="workspace-title"') < at('id="workspace-toggle"') && at('id="workspace-toggle"') < at('<div id="workspace-content">'));
+});
+
+test('a healthy workspace collapses to a one-line All OK summary with uptime and reading age', async () => {
+  const page = await glancePage();
+  assert.deepEqual(disclosure(page), CLOSED);
+  assert.equal(metaText(page), '✓ All OK · up 2h 46m · checked just now');
+  assert.ok(page.element('workspace-meta').innerHTML.includes('<span class="healthy">✓ All OK</span>'));
+  assert.equal(page.element('workspace-toggle').innerHTML, '<span aria-hidden="true">▸</span> Show details');
+  assert.equal(page.element('workspace-error').hidden, true);
+  // The detail is still rendered, so opening it shows the latest reading at once.
+  assert.ok(page.element('workspace-content').innerHTML.includes('machine-metrics'));
+  assert.ok(page.element('workspace-diagnostics').innerHTML.includes('Computer diagnostics'));
+
+  toggleWorkspace(page);
+  assert.deepEqual(disclosure(page), OPEN);
+  assert.equal(metaText(page), 'HP laptop · up 2h 46m · checked just now');
+  assert.equal(page.element('workspace-toggle').innerHTML, '<span aria-hidden="true">▾</span> Hide details');
+});
+
+test('every warning or critical workspace condition opens the panel by default', async () => {
+  const cases = [
+    'workspace.diagnostics.healthChecks[0].state = "unhealthy"',
+    'workspace.services[1].state = "failed"',
+    'workspace.diagnostics.memoryLevel = "warning"',
+    'workspace.diagnostics.memoryLevel = "critical"',
+    'workspace.diagnostics.disks[0].usedPct = 96',
+    'workspace.autoUpdate.state = "failed"',
+    'workspace.autoUpdate.timerActive = false',
+    'workspace.internet.state = "offline"',
+    'workspace.diagnostics.backup.state = "failed"',
+  ];
+  for (const change of cases) {
+    const workspace = healthyWorkspace();
+    new Function('workspace', change)(workspace);
+    const page = await glancePage({ workspace });
+    assert.ok(JSON.parse(page.run('JSON.stringify(workspaceConditions(workspace))')).length, change);
+    assert.deepEqual(disclosure(page), OPEN, change);
+    assert.ok(metaText(page).startsWith('HP laptop · up'), change);
+  }
+});
+
+test('missing, failed, stale and unsupported readings never leave the panel collapsed without an explanation', async () => {
+  // Still loading: the body says so.
+  let resolve;
+  const loading = await glancePage({ hidden: (id) => id === 'workspace-toggle', // as in the markup
+    respond: (url) => (url.startsWith('/api/workspace') ? new Promise((r) => { resolve = r; }) : undefined) });
+  loading.tick();
+  assert.equal(loading.element('workspace-content').hidden, false);
+  assert.equal(loading.element('workspace-toggle').hidden, true, 'no toggle before there is anything to collapse');
+  resolve({ ok: true, json: async () => healthyWorkspace() });
+  await settle();
+  assert.deepEqual(disclosure(loading), CLOSED, 'collapses once a healthy reading arrives');
+
+  // No reading at all.
+  const failed = await glancePage({ respond: failWith('/api/workspace') });
+  assert.equal(failed.element('workspace-content').hidden, false);
+  assert.equal(failed.element('workspace-toggle').hidden, true);
+  assert.equal(metaText(failed), 'Unavailable');
+  assert.equal(failed.element('workspace-error').hidden, false);
+
+  // Not Linux.
+  const unsupported = await glancePage({ workspace: { supported: false } });
+  assert.equal(unsupported.element('workspace-content').hidden, false);
+  assert.ok(unsupported.element('workspace-content').innerHTML.includes('Computer monitoring is available on Linux.'));
+  assert.equal(unsupported.element('workspace-toggle').hidden, true);
+
+  // Over 90 s old: open by default, with the note.
+  const stale = await glancePage({ workspace: { ...healthyWorkspace(), generatedAt: NOW - 120_000 } });
+  assert.deepEqual(disclosure(stale), OPEN);
+  assert.equal(stale.element('workspace-error').hidden, false);
+
+  // An update fails after a healthy reading: open by default. If the owner closes it, the summary and the note still say so.
+  let fail = false;
+  const later = await glancePage({ respond: (url, init) => (fail ? failWith('/api/workspace')(url, init) : undefined) });
+  assert.deepEqual(disclosure(later), CLOSED);
+  fail = true;
+  await later.run('loadWorkspace()');
+  assert.deepEqual(disclosure(later), OPEN);
+  toggleWorkspace(later);
+  assert.deepEqual(disclosure(later), CLOSED);
+  assert.equal(later.element('workspace-error').hidden, false);
+  assert.ok(later.element('workspace-error').textContent.includes("Can't update computer status. Showing the last reading."));
+  assert.equal(metaText(later), '✓ All OK · up 2h 46m · checked just now');
+});
+
+test('the owner’s choice survives refreshes and the clock tick, but a new condition opens the panel again', async () => {
+  let workspace = healthyWorkspace();
+  const page = await glancePage({ respond: (url) => (url.startsWith('/api/workspace') ? { ok: true, json: async () => workspace } : undefined) });
+  assert.deepEqual(disclosure(page), CLOSED);
+  toggleWorkspace(page);
+  assert.deepEqual(disclosure(page), OPEN);
+  await page.run('loadWorkspace()');
+  page.tick();
+  await page.element('refresh').onclick();
+  assert.deepEqual(disclosure(page), OPEN, 'opened by the owner, it stays open while healthy');
+  toggleWorkspace(page);
+  assert.deepEqual(disclosure(page), CLOSED);
+
+  // A condition appears: it opens, even though the owner closed it.
+  workspace = healthyWorkspace();
+  workspace.power = { acOnline: false, batteries: [{ percent: 25, status: 'Discharging' }] };
+  await page.run('loadWorkspace()');
+  assert.deepEqual(disclosure(page), OPEN);
+  // The owner closes it again with the condition on screen; the same condition doesn't reopen it,
+  // even as its reading moves, and the summary names the count instead of All OK.
+  toggleWorkspace(page);
+  workspace = structuredClone(workspace);
+  workspace.power.batteries[0].percent = 24;
+  await page.run('loadWorkspace()');
+  page.tick();
+  assert.deepEqual(disclosure(page), CLOSED);
+  assert.equal(metaText(page), '⚠ 1 warning · up 2h 46m · checked just now');
+  assert.ok(page.element('workspace-meta').innerHTML.includes('<span class="warning">⚠ 1 warning</span>'));
+  // Getting worse is new: the battery falls to critical.
+  workspace = structuredClone(workspace);
+  workspace.power.batteries[0].percent = 8;
+  await page.run('loadWorkspace()');
+  assert.deepEqual(disclosure(page), OPEN);
+  // Once all is well again, the panel goes back to its compact default.
+  workspace = healthyWorkspace();
+  await page.run('loadWorkspace()');
+  assert.deepEqual(disclosure(page), CLOSED);
+});
+
+test('following a link to #workspace opens the panel, by click, by hashchange and on load', async () => {
+  const page = await glancePage();
+  assert.deepEqual(disclosure(page), CLOSED);
+  const link = { closest: (selector) => (selector === 'a[href="#workspace"]' ? link : null) };
+  page.click(link);
+  assert.deepEqual(disclosure(page), OPEN);
+  page.run('loadWorkspace()');
+  await settle();
+  assert.deepEqual(disclosure(page), OPEN, 'stays open after a refresh');
+
+  // Clicks elsewhere don't touch it.
+  toggleWorkspace(page);
+  page.click({ closest: () => null });
+  assert.deepEqual(disclosure(page), CLOSED);
+
+  page.location.hash = '#pipeline';
+  page.fire('hashchange');
+  assert.deepEqual(disclosure(page), CLOSED);
+  page.location.hash = '#workspace';
+  page.fire('hashchange');
+  assert.deepEqual(disclosure(page), OPEN);
+
+  assert.deepEqual(disclosure(await glancePage({ hash: '#workspace' })), OPEN);
+});
+
+test('the choice is remembered in localStorage when it works, and a throwing localStorage changes nothing', async () => {
+  const storage = memoryStorage();
+  const first = await glancePage({ storage });
+  toggleWorkspace(first);
+  assert.equal(storage.m.get('ai-quota-dashboard:workspace-details'), 'open');
+  assert.deepEqual(disclosure(await glancePage({ storage })), OPEN, 'a reload keeps it open');
+  toggleWorkspace(first);
+  assert.equal(storage.m.get('ai-quota-dashboard:workspace-details'), 'closed');
+  // A remembered close never hides the conditions found on load.
+  const workspace = healthyWorkspace();
+  workspace.diagnostics.memoryLevel = 'critical';
+  assert.deepEqual(disclosure(await glancePage({ storage, workspace })), OPEN);
+  // Following the link doesn't overwrite the remembered choice.
+  const linked = await glancePage({ storage, hash: '#workspace' });
+  assert.deepEqual(disclosure(linked), OPEN);
+  assert.equal(storage.m.get('ai-quota-dashboard:workspace-details'), 'closed');
+
+  for (const broken of [() => { throw new DOMException('denied', 'SecurityError'); },
+    { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } }]) {
+    const page = await glancePage({ storage: broken });
+    assert.deepEqual(disclosure(page), CLOSED);
+    assert.equal(metaText(page), '✓ All OK · up 2h 46m · checked just now');
+    toggleWorkspace(page);
+    assert.deepEqual(disclosure(page), OPEN);
+    toggleWorkspace(page);
+    assert.deepEqual(disclosure(page), CLOSED);
+  }
+});
+
+// ---------- The collapsible Agent pipeline panel ----------
+const pipelineDisclosure = (page) => ({
+  expanded: page.element('pipeline-toggle').attributes['aria-expanded'],
+  body: !page.element('pipeline-content').hidden,
+  button: !page.element('pipeline-toggle').hidden,
+});
+const PIPE_OPEN = { expanded: 'true', body: true, button: true };
+const PIPE_CLOSED = { expanded: 'false', body: false, button: true };
+const pipelineMeta = (page) => unescapeHtml(page.element('pipeline-meta').innerHTML.replace(/<[^>]+>/g, '')).trim();
+const togglePipeline = (page) => page.element('pipeline-toggle').onclick();
+const pipeItem = (kind, number, extra = {}) => ({ kind, repo: 'o/alpha', number, url: `https://github.com/o/alpha/issues/${number}`, title: `item ${number}`, action: 'Act', ...extra });
+// A repo with 2 running jobs, 3 queued issues and 4 PRs stacked into its umbrella.
+const busyRepo = (extra = {}) => ({
+  slug: 'o/alpha', url: 'https://github.com/o/alpha', available: true, defaultBranch: 'main', openPrCount: 0, attention: [],
+  issues: { queued: [11, 12, 13].map((n) => ({ number: n, title: `q${n}`, url: `https://github.com/o/alpha/issues/${n}`, state: 'queued', createdAt: new Date(NOW).toISOString() })) },
+  jobs: { active: ['j1', 'j2'].map((id) => ({ id, mode: 'implement', status: 'running', createdAt: new Date(NOW).toISOString(), stale: false })), recent: [] },
+  stackedPrs: [1, 2, 3, 4].map((n) => ({ number: n, title: `s${n}`, url: `https://github.com/o/alpha/pull/${n}`, mergedAt: new Date(NOW).toISOString() })),
+  ...extra,
+});
+const pipelineWith = (change) => { const p = pipelineOf([], {}); p.overview.repos = [busyRepo()]; change?.(p); return p; };
+const pipelineReply = (get) => (url) => (url.startsWith('/api/pipeline') ? { ok: true, json: async () => get() } : undefined);
+
+test('the Agent pipeline header has a Hide/Show details button that controls its body', () => {
+  const at = (marker) => { const i = html.indexOf(marker); assert.ok(i > 0, marker); return i; };
+  const toggle = html.match(/<button[^>]* id="pipeline-toggle"[^>]*>/)[0];
+  assert.match(toggle, /type="button"/);
+  assert.match(toggle, /aria-controls="pipeline-content"/);
+  assert.match(toggle, / hidden>/, 'hidden until there is a reading to collapse');
+  assert.ok(at('id="pipeline-title"') < at('id="pipeline-toggle"') && at('id="pipeline-toggle"') < at('<div id="pipeline-content">'));
+});
+
+test('a healthy pipeline collapses to one summary line built from its totals, and Show details opens it', async () => {
+  const page = await glancePage({ pipeline: pipelineWith() });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  assert.equal(pipelineMeta(page), '✓ Nothing needs you · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+  assert.ok(page.element('pipeline-meta').innerHTML.includes('<span class="healthy">✓ Nothing needs you</span>'));
+  assert.equal(page.element('pipeline-toggle').innerHTML, '<span aria-hidden="true">▸</span> Show details');
+  // The detail is still rendered, so opening it shows the latest reading at once.
+  assert.ok(page.element('pipeline-content').innerHTML.includes('Nothing needs you right now.'));
+
+  togglePipeline(page);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  assert.equal(pipelineMeta(page), '1 repo in scope · GitHub read 1m ago · refreshes every 5 min');
+  assert.equal(page.element('pipeline-toggle').innerHTML, '<span aria-hidden="true">▾</span> Hide details');
+
+  // Singular counts, and an empty scope.
+  const quiet = await glancePage();
+  assert.equal(pipelineMeta(quiet), '✓ Nothing needs you · 0 jobs running · 0 queued · 0 stacked in umbrellas');
+  const one = await glancePage({ pipeline: pipelineWith((p) => { p.overview.repos[0].jobs.active.pop(); }) });
+  assert.ok(pipelineMeta(one).includes('· 1 job running ·'));
+});
+
+test('any attention item or problem opens the pipeline panel on first render', async () => {
+  const cases = {
+    'an attention item': (p) => { p.overview.attention = [pipeItem('review', 5)]; },
+    'a failed update': (p) => { p.error = 'agentctl overview failed or timed out'; },
+    'GitHub unavailable': (p) => { p.overview.github = { available: false, errors: ['down'], truncated: [] }; },
+    'a truncated reading': (p) => { p.overview.github.truncated = ['repos: first 50 only']; },
+    'paused': (p) => { p.overview.paused = true; },
+    'not configured': (p) => { p.overview.configured = false; },
+    'a stale job': (p) => { p.overview.repos[0].jobs.active[0].stale = true; },
+    'a repo GitHub returned nothing for': (p) => { p.overview.repos[0].available = false; },
+  };
+  for (const [name, change] of Object.entries(cases)) {
+    const page = await glancePage({ pipeline: pipelineWith(change) });
+    assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN, name);
+    assert.ok(pipelineMeta(page).includes('repo in scope'), name);
+  }
+  // The server becomes unreachable after a good reading.
+  let fail = false;
+  const page = await glancePage({ respond: (url, init) => (fail ? failWith('/api/pipeline')(url, init) : pipelineReply(pipelineWith)(url, init)) });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  fail = true;
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  assert.ok(page.element('pipeline-content').innerHTML.includes('Can’t reach the dashboard server. Showing the last reading.'));
+  // Closed by the owner, the summary still names the problem.
+  togglePipeline(page);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  assert.equal(pipelineMeta(page), '✓ Nothing needs you · ⚠ can’t reach the dashboard server · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+});
+
+test('loading and unavailable pipeline readings always show the body, with no toggle', async () => {
+  let resolve;
+  const loading = await glancePage({ hidden: (id) => id === 'pipeline-toggle', // as in the markup
+    respond: (url) => (url.startsWith('/api/pipeline') ? new Promise((r) => { resolve = r; }) : undefined) });
+  loading.tick();
+  assert.equal(loading.element('pipeline-content').hidden, false);
+  assert.equal(loading.element('pipeline-toggle').hidden, true);
+  assert.equal(pipelineMeta(loading), 'Loading…');
+  resolve({ ok: true, json: async () => pipelineWith() });
+  await settle();
+  assert.deepEqual(pipelineDisclosure(loading), PIPE_CLOSED, 'collapses once a healthy reading arrives');
+
+  const failed = await glancePage({ respond: failWith('/api/pipeline') });
+  assert.equal(failed.element('pipeline-content').hidden, false);
+  assert.equal(failed.element('pipeline-toggle').hidden, true);
+  assert.equal(pipelineMeta(failed), 'Unavailable');
+  assert.ok(failed.element('pipeline-content').innerHTML.includes('Pipeline overview unavailable'));
+
+  const noOverview = await glancePage({ pipeline: { available: false, error: 'agentctl overview failed or timed out', overview: null } });
+  assert.equal(noOverview.element('pipeline-content').hidden, false);
+  assert.equal(noOverview.element('pipeline-toggle').hidden, true);
+  // A remembered close doesn't hide the explanation either.
+  const storage = memoryStorage();
+  storage.setItem('ai-quota-dashboard:pipeline-details', 'closed');
+  const closedButFailed = await glancePage({ storage, respond: failWith('/api/pipeline') });
+  assert.equal(closedButFailed.element('pipeline-content').hidden, false);
+});
+
+test('the owner’s pipeline choice survives refreshes and the clock tick, but a new attention item opens it again', async () => {
+  let pipeline = pipelineWith();
+  const page = await glancePage({ respond: pipelineReply(() => pipeline) });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  togglePipeline(page);
+  await page.run('loadPipeline()');
+  page.tick();
+  await page.element('refresh').onclick();
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN, 'opened by the owner, it stays open while healthy');
+  togglePipeline(page);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+
+  // An item appears: it opens, even though the owner closed it.
+  pipeline = pipelineWith((p) => { p.overview.attention = [pipeItem('decision', 14)]; });
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  // Closed again with the item on screen, the same item on the next reading keeps it closed, and the summary counts it.
+  togglePipeline(page);
+  pipeline = pipelineWith((p) => { p.overview.attention = [pipeItem('decision', 14, { title: 'reworded' })]; });
+  await page.run('loadPipeline()');
+  page.tick();
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  assert.equal(pipelineMeta(page), '1 item needs you · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+  assert.ok(page.element('pipeline-meta').innerHTML.includes('<span class="warning">1 item needs you</span>'));
+  // Another item is new, even of the same kind in the same repo; so is the same number in another repo.
+  pipeline = pipelineWith((p) => { p.overview.attention = [pipeItem('decision', 14), pipeItem('decision', 15, { urgent: true })]; });
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  togglePipeline(page);
+  assert.equal(pipelineMeta(page), '🔥 2 items need you · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+  pipeline = pipelineWith((p) => { p.overview.attention = [pipeItem('decision', 14), pipeItem('decision', 15), pipeItem('needs-human', 14, { repo: 'o/beta' })]; });
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  togglePipeline(page);
+  assert.ok(page.element('pipeline-meta').innerHTML.includes('<span class="critical">3 items need you</span>'));
+  // A new problem reopens it too.
+  pipeline = structuredClone(pipeline);
+  pipeline.overview.repos[0].jobs.active[1].stale = true;
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  togglePipeline(page);
+  assert.ok(pipelineMeta(page).includes('⚠ 1 job overdue'));
+  // Once nothing needs the owner, the panel goes back to its compact default.
+  pipeline = pipelineWith();
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+});
+
+test('following a link to #pipeline opens the panel, by click, by hashchange and on load', async () => {
+  const page = await glancePage({ pipeline: pipelineWith() });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  const link = { closest: (selector) => (selector === 'a[href="#pipeline"]' ? link : null) };
+  page.click(link);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+  assert.deepEqual(disclosure(page), CLOSED, 'the Workspace panel is left alone');
+  await page.run('loadPipeline()');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN, 'stays open after a refresh');
+
+  togglePipeline(page);
+  page.click({ closest: () => null });
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  page.location.hash = '#workspace';
+  page.fire('hashchange');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  page.location.hash = '#pipeline';
+  page.fire('hashchange');
+  assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+
+  assert.deepEqual(pipelineDisclosure(await glancePage({ pipeline: pipelineWith(), hash: '#pipeline' })), PIPE_OPEN);
+});
+
+test('the pipeline choice is remembered under its own localStorage key, and a throwing localStorage changes nothing', async () => {
+  const storage = memoryStorage();
+  const first = await glancePage({ storage, pipeline: pipelineWith() });
+  togglePipeline(first);
+  assert.equal(storage.m.get('ai-quota-dashboard:pipeline-details'), 'open');
+  assert.equal(storage.m.has('ai-quota-dashboard:workspace-details'), false, 'the Workspace choice is separate');
+  const reloaded = await glancePage({ storage, pipeline: pipelineWith() });
+  assert.deepEqual(pipelineDisclosure(reloaded), PIPE_OPEN, 'a reload keeps it open');
+  assert.deepEqual(disclosure(reloaded), CLOSED);
+  togglePipeline(first);
+  assert.equal(storage.m.get('ai-quota-dashboard:pipeline-details'), 'closed');
+  assert.deepEqual(pipelineDisclosure(await glancePage({ storage, pipeline: pipelineWith() })), PIPE_CLOSED);
+  // A remembered close never hides the items found on load.
+  assert.deepEqual(pipelineDisclosure(await glancePage({ storage, pipeline: pipelineWith((p) => { p.overview.attention = [pipeItem('review', 3)]; }) })), PIPE_OPEN);
+  // Following the link doesn't overwrite the remembered choice.
+  assert.deepEqual(pipelineDisclosure(await glancePage({ storage, pipeline: pipelineWith(), hash: '#pipeline' })), PIPE_OPEN);
+  assert.equal(storage.m.get('ai-quota-dashboard:pipeline-details'), 'closed');
+
+  for (const broken of [() => { throw new DOMException('denied', 'SecurityError'); },
+    { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } }]) {
+    const page = await glancePage({ storage: broken, pipeline: pipelineWith() });
+    assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+    togglePipeline(page);
+    assert.deepEqual(pipelineDisclosure(page), PIPE_OPEN);
+    togglePipeline(page);
+    assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  }
+});
+
+test('the collapsed pipeline summary escapes problem text and never shows reading strings', async () => {
+  const page = await glancePage({ pipeline: pipelineWith((p) => { p.error = '<img src=x onerror=alert(1)>'; }) });
+  togglePipeline(page);
+  assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
+  assert.ok(!page.element('pipeline-meta').innerHTML.includes('<img'));
+  assert.equal(pipelineMeta(page), '✓ Nothing needs you · ⚠ last update failed · 2 jobs running · 3 queued · 4 stacked in umbrellas');
 });

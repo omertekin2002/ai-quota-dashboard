@@ -19,6 +19,8 @@ At the top, an **At a glance** strip answers three questions before you scroll. 
 
 The strip adds no requests. It's built from the quota, pipeline and computer readings the page already loads, and it redraws whenever one of them does. When a source can't be read, only its own tile says so: "⚠ Couldn't refresh" with the age of the last reading, or "Unavailable" when there's none yet.
 
+Below the strip, the panels come in the same order as its tiles: the quota cards, then the [Agent pipeline](#agent-pipeline), then the [Workspace computer](#workspace-computer) with its Computer diagnostics. While nothing needs you, the Agent pipeline panel is a single line, and so is the computer's panel while it's healthy. A healthy page is the strip, the quota cards and two one-line panels. Each panel opens by itself when something there needs a look.
+
 For each account and limit window, including model-specific ones such as Claude's Fable-only weekly limit when your plan has one:
 
 - how much is left, as a % with a meter
@@ -54,11 +56,17 @@ The **Agent pipeline** panel shows the state of the [build-workflow](https://git
 
 The data comes from `agentctl overview --json` in build-workflow. That command is read-only, and reads GitHub with one batched `gh api graphql` call. The server runs it in the background every 5 minutes, whether or not a page is open, and serves the cached result at `/api/pipeline`. **Refresh** forces a new reading, at most once a minute. The page re-reads the cache every minute and shows when GitHub was last read. If a run fails, the last reading stays visible with a warning. A repo GitHub returned nothing for is marked unavailable, while its jobs and local readings still show. The `agentctl` path defaults to `~/.local/bin/agentctl`; override it with `AGENTCTL`.
 
+While the reading is healthy, the panel collapses to one line in its header, such as "✓ Nothing needs you · 2 jobs running · 3 queued · 4 stacked in umbrellas", and **Show details** opens the totals, the attention list and the repos. Healthy means that nothing needs your attention, the last update worked and the dashboard server answered, GitHub was available and returned everything, the pipeline isn't paused and is configured, and no active job is overdue for a heartbeat or launch. Any of these opens the panel. While the overview is loading or unavailable, the panel always shows its body, because that holds the only explanation. Once you open or close it, it stays that way through refreshes. The browser remembers that choice, separately from the Workspace computer's, when it can store it. An attention item or problem that wasn't on screen before still opens it, so a new item is never hidden. With the panel closed, its header names how many items need you and what's wrong. Following the glance tile's **Needs you** link, or loading the page at `#pipeline`, opens it too.
+
 Unlike the process panel below, this panel publishes GitHub issue and PR titles and job summaries. Keep the dashboard tailnet-only.
 
 ## Workspace computer
 
-On Linux, the **Workspace computer** panel reports the computer running the dashboard:
+On Linux, the **Workspace computer** panel reports the computer running the dashboard.
+
+While every reading is healthy, the panel collapses to one line in its header, such as "✓ All OK · up 3d 4h · checked 20s ago", and **Show details** opens the readings below and the Computer diagnostics. It opens by itself whenever a reading is a warning or critical (the same conditions the At a glance tile counts), and when the reading is old or couldn't be updated. Once you open or close it, it stays that way through refreshes. The browser remembers that choice when it can store it. A condition that wasn't on screen before still opens it, so a new problem is never hidden; a reading that only moves, such as the battery going from 25% to 24%, doesn't count as new. The glance tile's **Workspace** link opens it too. With the panel closed, its header counts the open conditions instead of "All OK", and a note under it says when the reading is old or failed.
+
+The readings are:
 
 - Battery state of charge, charging state, and AC power.
 - CPU temperature, plus GPU and SSD temperatures when their sensors are readable.
@@ -67,7 +75,7 @@ On Linux, the **Workspace computer** panel reports the computer running the dash
 - Whether **CLIProxyAPI**, **ngrok-proxy-llm**, **T3 Code**, **Tailscale**, and the **network watchdog** are running, with automatic restart counts and service uptime. HTTP checks separately verify T3's local page and Tailscale route, CLIProxyAPI's `/healthz`, the retry proxy's backend-aware `/health`, and its public ngrok route. They don't send LLM requests or refresh credentials.
 - An **Auto-update** row for the updater in [Keeping hp-laptop up to date](#keeping-hp-laptop-up-to-date), such as "Auto-update: last run 19:45 ✓ · next 20:00". A failed run shows a ⚠ warning with its exit status and the `journalctl --user -u ai-quota-dashboard-update` command that explains it; a stopped timer gets its own ⚠ warning. On a machine without the updater units the row just says "not installed". It comes from one read-only `systemctl --user show` of `ai-quota-dashboard-update.service` and its timer, published as `autoUpdate` in `/api/workspace`.
 
-Below the quota cards, **Computer diagnostics** adds:
+Below the panel, behind the same **Show details** button, **Computer diagnostics** adds:
 
 - Linux CPU, memory, and I/O pressure (the share of time tasks were stalled over the last 10 seconds), plus the five largest processes by resident memory. The top-memory list shows executable names and PIDs, without arguments or environments. Memory warnings use available RAM and pressure: warning at ≤10% available, ≥10% partial stalls, or ≥1% full stalls; critical at ≤5% available or ≥10% full stalls.
 - Internal SSD and T7 free space, actual T7 mount presence, read-only mount detection, and the last backup result, last known success, and next scheduled run. An autofs placeholder does not count as a mounted T7. A previous successful backup remains recorded if a later run fails; the last-success time is unknown if monitoring starts after a failure with no earlier record.
@@ -97,7 +105,9 @@ Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process 
 
 Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s. `test/deploy.test.mjs` runs `deploy/update.sh` against a temporary git origin and clone with a fake `systemctl`, and `deploy/install.sh` against a temporary home.
 
-GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and `deploy/` scripts, and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`.
+`npm test` needs no install. The browser checks do: run `npm ci`, `npx playwright install chromium` once, then `npm run test:browser`. They live in `e2e/` and start the real server (`createDashboardServer()`) on a random port with fake collectors, so they read no credentials, providers, `agentctl` or `/proc`, and any request to anything but that server fails the test. Headless Chromium loads the page at phone (390×844, touch) and desktop (1280×800) width and checks that the page never scrolls sideways, that quota cards sit under At a glance, that window details open by tap, click, Enter or Space, close with Escape, keep focus and survive a refresh, that a failed workspace HTTP check opens the Workspace computer panel and names it in the glance tile, that Show/Hide details is remembered across reloads, that the glance tile's Workspace link opens a collapsed panel, that the Agent pipeline collapses to one summary line while nothing needs you, opens by keyboard, remembers Show/Hide across reloads, reopens for a new attention item and opens from the Needs you link (also when the URL already ends in `#pipeline`), that a closed Agent pipeline repo stays closed through a refresh, and that a failing quota collector shows "Couldn't refresh" while the other panels keep working. A failed run keeps a trace in `test-results/` (`npx playwright show-trace <file>`).
+
+GitHub Actions (`.github/workflows/test.yml`) syntax-checks the modules and `deploy/` scripts, and runs `npm test` on Node 18, 20, 22 and 24 for every pull request into `main` or `agent/improvements`. A separate job installs Playwright and Chromium on Node 22 and runs `npm run test:browser`.
 
 ## Where the credentials come from
 
