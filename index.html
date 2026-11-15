@@ -88,6 +88,7 @@
   .fresh { margin-left: auto; font-size: 12px; color: var(--ink-muted); white-space: nowrap; }
   .fresh.stale { color: var(--warning-ink); }
   .card-error { color: var(--ink-2); font-size: 13px; padding: 12px 0; }
+  .card-note { color: var(--ink-muted); font-size: 12.5px; padding: 10px 0 12px; overflow-wrap: anywhere; }
   .card-error code, .empty code { font-size: 12px; background: var(--hairline); padding: 1px 5px; border-radius: 4px; }
 
   .win { padding: 14px 0; border-bottom: 1px solid var(--hairline); outline: none; border-radius: 4px; }
@@ -1146,6 +1147,10 @@
     const body = a.windows?.length
       ? a.windows.map((w, wi) => renderWindow(a, w, now, ai, wi)).join('')
       : '';
+    // Static text: the flag only says Anthropic reported no 5-hour window, not that usage is unlimited.
+    const note = a.provider === 'claude' && a.noSessionLimit === true
+      ? '<div class="card-note">No 5-hour limit reported by Anthropic for this account</div>'
+      : '';
     const err = a.error ? `<div class="card-error">${a.stale ? 'Showing the last reading. ' : ''}${md(a.error)}</div>` : '';
     return `
       <article class="card">
@@ -1157,7 +1162,7 @@
           </div>
           ${fresh}
         </header>
-        ${a.stale ? err : ''}${body}${a.stale ? '' : err}
+        ${a.stale ? err : ''}${body}${note}${a.stale ? '' : err}
       </article>`;
   }
 

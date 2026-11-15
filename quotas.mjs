@@ -218,6 +218,11 @@ export function claudeWindows(u) {
   return windows;
 }
 
+// True only when the usage response explicitly reports `five_hour: null`.
+export function claudeNoSessionLimit(u) {
+  return u?.five_hour === null;
+}
+
 async function fetchClaude(env, profileCache, force) {
   const creds = claudeCredentials(env);
   // Identify each token's account (email) so the same login from two sources shows once.
@@ -240,7 +245,11 @@ async function fetchClaude(env, profileCache, force) {
     try {
       const usage = await withFirstWorking(env, list, (c) => getJson(env, 'https://api.anthropic.com/api/oauth/usage', claudeHeaders(c.token)));
       const windows = claudeWindows(usage);
-      accounts.push({ ...base, windows, limitReached: windows.some((w) => w.usedPct != null && w.usedPct >= 100) });
+      const account = { ...base, windows, limitReached: windows.some((w) => w.usedPct != null && w.usedPct >= 100) };
+      // Anthropic sends `five_hour: null` when the account has no 5-hour cap right now. That is a reading,
+      // unlike a missing key or `{ utilization: null }` (usage unknown), so the card can say so.
+      if (claudeNoSessionLimit(usage)) account.noSessionLimit = true;
+      accounts.push(account);
     } catch (err) {
       accounts.push({ ...base, error: describeError(err, 'claude') });
     }

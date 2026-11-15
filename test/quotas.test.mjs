@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createQuotaCollector, claudeWindows, claudePlan, codexWindows, windowLabel, describeError, pct } from '../quotas.mjs';
+import { createQuotaCollector, claudeWindows, claudeNoSessionLimit, claudePlan, codexWindows, windowLabel, describeError, pct } from '../quotas.mjs';
 import { parseAllowedHosts, isAllowedHost } from '../hosts.mjs';
 
 const NOW = Date.UTC(2026, 9, 25, 12);
@@ -209,6 +209,46 @@ test('an account whose usage is unreadable is not reported as limit reached', as
   const opts = await fixture(t, accountFiles);
   const [claude] = (await createQuotaCollector({ ...opts, fetchImpl, now: () => NOW })(true)).accounts;
   assert.deepEqual([claude.error, claude.limitReached, claude.windows.map((w) => w.usedPct)], [undefined, false, [null, null]]);
+});
+
+test('an explicit five_hour: null flags the Claude account as having no 5-hour limit, and nothing else does', async (t) => {
+  const cases = [
+    [{ five_hour: null, seven_day: { utilization: 20 } }, true, [['seven_day', 20]]],
+    [{ seven_day: { utilization: 20 } }, undefined, [['seven_day', 20]]],
+    [{ five_hour: { utilization: null }, seven_day: { utilization: 20 } }, undefined, [['five_hour', null], ['seven_day', 20]]],
+    [{ five_hour: { utilization: 30 }, seven_day: { utilization: 20 } }, undefined, [['five_hour', 30], ['seven_day', 20]]],
+  ];
+  for (const [usage, flag, windows] of cases) {
+    const routes = structuredClone(healthyRoutes);
+    routes.claude['claude-proxy-token'] = usage;
+    const { fetchImpl } = fakeFetch(routes);
+    const opts = await fixture(t, accountFiles);
+    const [claude, codex] = (await createQuotaCollector({ ...opts, fetchImpl, now: () => NOW })(true)).accounts;
+    assert.equal(claude.noSessionLimit, flag, JSON.stringify(usage));
+    assert.deepEqual(claude.windows.map((w) => [w.id, w.usedPct]), windows);
+    assert.ok(!('noSessionLimit' in codex));
+  }
+  assert.deepEqual([null, undefined, {}, { five_hour: undefined }, { five_hour: 0 }, { five_hour: null }].map(claudeNoSessionLimit), [false, false, false, false, false, true]);
+});
+
+test('a failed read never sets the flag, and a stale account keeps the flag from its last good reading', async (t) => {
+  let clock = NOW;
+  const routes = structuredClone(healthyRoutes);
+  routes.claude['claude-proxy-token'] = 500;
+  const { fetchImpl } = fakeFetch(routes);
+  const opts = await fixture(t, accountFiles);
+  const getQuotas = createQuotaCollector({ ...opts, fetchImpl, now: () => clock });
+  const failed = (await getQuotas(true)).accounts[0];
+  assert.ok(failed.error && !('noSessionLimit' in failed));
+
+  routes.claude['claude-proxy-token'] = { five_hour: null, seven_day: { utilization: 20 } };
+  clock += 20_000;
+  assert.equal((await getQuotas(true)).accounts[0].noSessionLimit, true);
+
+  routes.claude['claude-proxy-token'] = 500;
+  clock += 20_000;
+  const stale = (await getQuotas(true)).accounts[0];
+  assert.deepEqual([stale.stale, stale.noSessionLimit, stale.windows.map((w) => w.id)], [true, true, ['seven_day']]);
 });
 
 test('last-good.json is saved atomically and privately', async (t) => {
