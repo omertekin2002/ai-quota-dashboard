@@ -258,6 +258,28 @@ test('healthy: quota cards under At a glance, a one-line All OK workspace, no si
   await expectNoSideScroll(page);
 });
 
+test('a Claude account with no 5-hour limit reported says so in a note on its card, without sideways scroll', async ({ page, dash }) => {
+  const quotas = quotasOf();
+  const claude = quotas.accounts[0];
+  claude.windows = claude.windows.filter((w) => w.id !== 'five_hour');
+  claude.noSessionLimit = true;
+  dash.state.quotas = quotas;
+  await dash.open();
+
+  const claudeCard = card(page, 'claude-user@example.com');
+  const note = claudeCard.locator('.card-note');
+  await expect(note).toBeVisible();
+  await expect(note).toHaveText('No 5-hour limit reported by Anthropic for this account');
+  await expect(claudeCard.locator('.win')).toHaveCount(1);
+  await expect(claudeCard.locator('.win-label')).toHaveText(['Weekly']);
+  await expect(page.locator('#content .card-note')).toHaveCount(1);
+  // The note sits inside its card, below the windows.
+  const [cardBox, noteBox, winBox] = [await claudeCard.boundingBox(), await note.boundingBox(), await claudeCard.locator('.win').boundingBox()];
+  expect(noteBox.y).toBeGreaterThanOrEqual(winBox.y + winBox.height);
+  expect(noteBox.x + noteBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width);
+  await expectNoSideScroll(page);
+});
+
 test('healthy: a repo closed in the Agent pipeline stays closed through a refresh', async ({ page, dash, isMobile }) => {
   await dash.open();
   const repo = page.locator('#pipeline details.repo');

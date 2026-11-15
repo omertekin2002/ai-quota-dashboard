@@ -392,6 +392,38 @@ test('stale accounts show their reading age, put the error first, and never prom
   assert.deepEqual(page.timeouts, [20_000]);
 });
 
+test('a Claude card flagged with no 5-hour limit says so in static text, and nothing else changes', async () => {
+  const NOTE = '<div class="card-note">No 5-hour limit reported by Anthropic for this account</div>';
+  const weekly = () => [win('Weekly', 40, 2 * 86_400, WEEK), win('Weekly · Fable', 10, 2 * 86_400, WEEK)];
+  const accounts = (flagged) => [
+    account('claude:a', weekly(), flagged ? { noSessionLimit: true } : {}),
+    account('claude:stale', weekly(), { email: 'stale@example.com', stale: true, fetchedAt: NOW - 3_600_000, error: 'Token expired.', ...(flagged && { noSessionLimit: true }) }),
+    account('claude:plain', [win('5-hour', 20, 9000), ...weekly()], { email: 'plain@example.com' }),
+    // Only Claude cards carry the note; a stray flag elsewhere, or a non-true value, shows nothing.
+    account('openai:b', [win('5-hour', 20, 9000)], { provider: 'openai', name: 'ChatGPT', email: 'b@example.com', noSessionLimit: true }),
+    account('antigravity:c', [win('Gemini · 5-hour', 20, 9000)], { provider: 'antigravity', name: 'Antigravity', plan: null, sources: ['T3 Code'], noSessionLimit: true }),
+    account('claude:odd', weekly(), { email: 'odd@example.com', noSessionLimit: '<img src=x onerror=alert(1)>' }),
+  ];
+  const flagged = await renderQuotas(quotasOf(...accounts(true)));
+  const plain = await renderQuotas(quotasOf(...accounts(false)));
+  const cards = cardsOf(flagged.cards);
+  assert.equal(cards.length, 6);
+  for (const card of cards.slice(0, 2)) {
+    assert.equal(card.split(NOTE).length, 2, card);
+    // After the windows, and for a stale account after its leading error too.
+    assert.ok(card.indexOf(NOTE) > card.lastIndexOf('class="win"'), card);
+    assert.ok(!card.includes('5-hour') || card.indexOf('5-hour') > card.indexOf(NOTE), card);
+    assert.ok(!/unlimited/i.test(card), card);
+  }
+  for (const card of [...cards.slice(2), ...cardsOf(plain.cards)]) assert.ok(!card.includes('card-note'), card);
+  assert.ok(!flagged.cards.includes('<img'));
+  // No invented row: the windows, the table, the tab title and the At a glance Capacity tile match the unflagged page.
+  assert.equal(flagged.cards.replaceAll(NOTE, ''), plain.cards);
+  assert.equal(flagged.table, plain.table);
+  assert.equal(flagged.document.title, plain.document.title);
+  assert.equal(flagged.element('glance-capacity').innerHTML, plain.element('glance-capacity').innerHTML);
+});
+
 test('quota cards, table and tooltip escape account and window strings', async () => {
   const evil = {
     name: '<img src=x onerror=alert(1)>', plan: '"><script>p()</script>', email: `o'neil"<b>@example.com`,
