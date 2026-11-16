@@ -144,7 +144,7 @@ test('unreadable process/job sources are unknown and malformed job records are p
   assert.equal(partial.partial, true);
 });
 
-test('workflow lifecycle events survive missing sources without false process exits', async () => {
+test('workflow lifecycle events survive missing sources and never record routine process starts or exits', async () => {
   const record = createWorkspaceHistory();
   const s = { generatedAt: 1000000, uptimeSec: 100, memory: null, internet: { state: 'online', latencyMs: 1 }, services: [],
     diagnostics: { pressure: { memory: null }, oomKills: 0, healthChecks: [], disks: [], backup: { state: 'unknown' },
@@ -155,7 +155,7 @@ test('workflow lifecycle events survive missing sources without false process ex
   w.processes = [{ id: '10:1234', pid: 10, name: 'bun', state: 'S' }];
   w.activeJobs = [{ id: 'job-test-001', status: 'running', stale: true }];
   const start = await record(s);
-  assert.ok(start.events.some((e) => e.title.includes('process started')));
+  assert.ok(!start.events.some((e) => e.title.includes('process started')));
   assert.ok(start.events.some((e) => e.title.includes('heartbeat overdue')));
   s.generatedAt += 30_000;
   w.available = false; w.processes = []; w.jobsAvailable = false; w.activeJobs = [];
@@ -163,6 +163,6 @@ test('workflow lifecycle events survive missing sources without false process ex
   s.generatedAt += 30_000;
   w.available = true; w.jobsAvailable = true; w.recentJobs = [{ id: 'job-test-001', status: 'done', stale: false }];
   const finished = await record(s);
-  assert.ok(finished.events.some((e) => e.title.includes('process exited')));
+  assert.ok(!finished.events.some((e) => e.title.includes('process exited')));
   assert.ok(finished.events.some((e) => e.title.includes('job-test-001: done')));
 });
