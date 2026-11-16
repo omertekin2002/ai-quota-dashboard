@@ -9,6 +9,35 @@ export function memoryLevel(snapshot) {
   return snapshot.memory || pressure ? 'healthy' : 'unknown';
 }
 
+export const MAX_EVENTS = 100, MAX_ROUTINE_EVENTS = 20, EVENT_RETENTION_MS = 7 * 86400_000;
+
+// An event's id is `${timestamp}:${key}:${title}`; the key says what it is about.
+function eventKey(event) {
+  const prefix = `${event.timestamp}:`;
+  return typeof event.id === 'string' && event.id.startsWith(prefix) ? event.id.slice(prefix.length) : '';
+}
+
+// Info-level agent pipeline activity (job status changes, heartbeat recoveries, pause/resume, timer enabled).
+export function isRoutineEvent(event) {
+  return event.level === 'info' && eventKey(event).startsWith('agent-');
+}
+
+// Process start/exit events recorded by older builds; they are no longer kept.
+function isProcessChurn(event) {
+  return event.level === 'info' && eventKey(event).startsWith('agent-process:');
+}
+
+// Keeps seven days, newest first. Routine agent activity gets its own small budget and only
+// fills room the other events leave, so it never pushes out an incident.
+export function pruneEvents(events, now) {
+  const recent = events
+    .filter((e) => e && Number.isFinite(e.timestamp) && e.timestamp >= now - EVENT_RETENTION_MS && e.timestamp <= now && !isProcessChurn(e))
+    .sort((a, b) => b.timestamp - a.timestamp);
+  const main = recent.filter((e) => !isRoutineEvent(e)).slice(0, MAX_EVENTS);
+  const routine = recent.filter(isRoutineEvent).slice(0, Math.min(MAX_ROUTINE_EVENTS, MAX_EVENTS - main.length));
+  return [...main, ...routine].sort((a, b) => b.timestamp - a.timestamp);
+}
+
 export function createWorkspaceHistory({ file = null } = {}) {
   let loaded = false, events = [], samples = [], previous = null, lastSuccessAt = null, startedAt = null;
   return async function record(snapshot) {
@@ -57,11 +86,12 @@ export function createWorkspaceHistory({ file = null } = {}) {
         if (typeof before.paused === 'boolean' && after.paused !== before.paused) add('agent-pipeline', after.paused ? 'Agent pipeline paused' : 'Agent pipeline resumed');
         if (typeof before.timerActive === 'boolean' && after.timerActive !== before.timerActive) add('agent-timer', after.timerActive ? 'Agent pump timer enabled' : 'Agent pump timer inactive', after.timerActive ? 'info' : 'warning');
         if (workflow.available && before.processes) {
+          // Pipeline subprocesses come and go every minute and the live list is already on the page,
+          // so only a process that becomes stopped or zombie is worth an event.
           for (const [id, process] of Object.entries(after.processes)) {
-            if (!before.processes[id]) add(`agent-process:${id}`, `Workflow process started: ${process.name} (#${process.pid})`);
-            else if (['Z', 'T', 't'].includes(process.state) && process.state !== before.processes[id].state) add(`agent-process:${id}`, `Workflow process stopped or zombie: ${process.name} (#${process.pid})`, 'warning');
+            const old = before.processes[id];
+            if (old && ['Z', 'T', 't'].includes(process.state) && process.state !== old.state) add(`agent-process:${id}`, `Workflow process stopped or zombie: ${process.name} (#${process.pid})`, 'warning');
           }
-          for (const [id, process] of Object.entries(before.processes)) if (!after.processes[id]) add(`agent-process:${id}`, `Workflow process exited: ${process.name} (#${process.pid})`);
         }
         if (workflow.jobsAvailable && !workflow.partial && before.jobs) {
           for (const [id, job] of Object.entries(after.jobs)) {
@@ -125,7 +155,7 @@ export function createWorkspaceHistory({ file = null } = {}) {
     // One sample per 25 seconds, regardless of how often visitors press Refresh.
     if (!samples.length || now - samples.at(-1).timestamp >= 25_000) samples.push({ timestamp: now, state: snapshot.internet.state, latencyMs: snapshot.internet.latencyMs });
     samples = samples.filter((s) => s.timestamp >= now - 30 * 60_000 && s.timestamp <= now).slice(-80);
-    events = events.filter((e) => e.timestamp >= now - 7 * 86400_000 && e.timestamp <= now).sort((a, b) => b.timestamp - a.timestamp).slice(0, 100);
+    events = pruneEvents(events, now);
     previous = current;
     let persisted = null;
     if (file) {
