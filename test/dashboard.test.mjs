@@ -984,6 +984,45 @@ test('a live window past its reset reloads after 20 s, but not again while loads
   assert.equal(reloads().length, 2, 'a successful load schedules it again');
 });
 
+test('the Incidents card shows active, recovered and one-off episodes in text, escapes titles, and has an empty state', async () => {
+  const now = Date.UTC(2026, 10, 17, 12, 0), MIN = 60_000;
+  const fixture = {
+    generatedAt: now, supported: true, model: 'HP laptop', uptimeSec: 10000, power: { acOnline: true, batteries: [] }, temperatures: [],
+    memory: { usedPct: 50, usedBytes: 1024 ** 3, totalBytes: 2 * 1024 ** 3 }, internet: { state: 'online', latencyMs: 50 }, services: [],
+    diagnostics: { memoryLevel: 'healthy', pressure: { cpu: null, memory: null, io: null }, topProcesses: [], disks: [],
+      backup: { state: 'success', lastSuccessAt: now - MIN, scheduleActive: true }, tailscale: { state: 'running', connections: [] }, healthChecks: [] },
+    history: { events: [], samples: [], persisted: true, episodes: [
+      { key: 'memory', title: 'Memory pressure elevated or available RAM low', level: 'critical', startedAt: now - 95 * MIN, endedAt: null, state: 'active', eventCount: 2,
+        caveats: ['Computer restarted during this incident; the recovery may only have been seen once it was back'] },
+      { key: 't3-local', title: '<script>alert(1)</script> · HTTP check: response failed', level: 'warning', startedAt: now - 200 * MIN, endedAt: now - 170 * MIN, state: 'recovered', eventCount: 2, caveats: [] },
+      { key: 'oom', title: 'Linux killed a process because memory ran out', level: 'critical', startedAt: now - 300 * MIN, endedAt: now - 300 * MIN, state: 'once', eventCount: 1, caveats: [] },
+      { key: 'internet', title: 'Internet connection restored', level: 'info', startedAt: null, endedAt: now - 400 * MIN, state: 'recovered', eventCount: 1, caveats: ['Start not retained; it is older than the kept history'] },
+    ] },
+  };
+  const page = await loadDashboard({ now, workspace: fixture, hidden: (id) => id === 'workspace-diagnostics' });
+  const html = page.element('workspace-diagnostics').innerHTML;
+  const card = html.slice(html.indexOf('<h3>Incidents</h3>'), html.indexOf('<h3>Recent events</h3>'));
+  assert.ok(card.length > 0, 'Incidents comes before Recent events');
+  const text = unescapeHtml(card.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ');
+  for (const label of ['Active: Memory pressure elevated or available RAM low', '1h 35m so far', '2 changes recorded', 'Computer restarted during this incident',
+    'Recovered: <script>alert(1)</script> · HTTP check: response failed', 'lasted 30m', 'Observed once: Linux killed a process', 'Observed once at',
+    'Recovered: Internet connection restored', 'Recovered at', 'Start not retained', 'sampled every 30 seconds, so durations are approximate']) assert.ok(text.includes(label), label);
+  assert.ok(text.indexOf('Active: Memory') < text.indexOf('Recovered: <script>'));
+  assert.ok(!card.includes('<script>'));
+  assert.ok(card.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+  assert.ok(card.includes(`datetime="${new Date(now - 95 * MIN).toISOString()}"`));
+  page.run('workspace.history.episodes = []; renderWorkspace();');
+  assert.ok(page.element('workspace-diagnostics').innerHTML.includes('No incidents in the last seven days'));
+  page.run('workspace.history.episodes = Array.from({ length: 12 }, (_, i) => ({ key: "link", title: "Link drop " + i, level: "warning", startedAt: ' + now + ' - i * 60000, endedAt: ' + now + ' - i * 60000, state: "once", eventCount: 1, caveats: [] })); renderWorkspace();');
+  const many = page.element('workspace-diagnostics').innerHTML;
+  assert.ok(many.includes('Showing 10 of 12 incidents.'));
+  assert.ok(!many.includes('Link drop 10'));
+  // A server from before episodes existed: no Incidents card, Recent events still there.
+  page.run('delete workspace.history.episodes; renderWorkspace();');
+  assert.ok(!page.element('workspace-diagnostics').innerHTML.includes('<h3>Incidents</h3>'));
+  assert.ok(page.element('workspace-diagnostics').innerHTML.includes('<h3>Recent events</h3>'));
+});
+
 // ---------- At a glance ----------
 // Healthy readings for every source; each scenario below changes one thing.
 const healthyWorkspace = () => ({

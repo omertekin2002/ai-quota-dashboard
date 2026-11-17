@@ -6,6 +6,7 @@
 // reading happens. Any request that isn't to the test server is aborted and fails the test.
 import { test as base, expect } from '@playwright/test';
 import { createDashboardServer } from '../server.mjs';
+import { incidentEpisodes } from '../workspace-history.mjs';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -473,6 +474,43 @@ test('workspace: the Show/Hide details choice survives a reload through localSto
   expect(await dash.stored()).toBe('closed');
   await dash.reload();
   await expectWorkspaceOpen(page, false);
+});
+
+// ---------- 3b. incidents ----------
+test('incidents: the Incidents card lists an active and a recovered episode in text, before Recent events, without sideways scroll', async ({ page, dash }) => {
+  const ws = healthyWorkspace(), now = Date.now(), MIN = 60_000;
+  const ev = (timestamp, key, title, level = 'info') => ({ id: `${timestamp}:${key}:${title}`, timestamp, level, title });
+  // Long machine-supplied titles, to check that they wrap on a phone.
+  ws.history.events = [
+    ev(now - 10 * MIN, 'memory', 'Memory pressure elevated or available RAM low', 'critical'),
+    ev(now - 60 * MIN, 'ngrok-public', 'ngrok-proxy-llm · Public ngrok route (https://an-unusually-long-subdomain.ngrok-free.app/health): response recovered'),
+    ev(now - 75 * MIN, 'ngrok-public', 'ngrok-proxy-llm · Public ngrok route (https://an-unusually-long-subdomain.ngrok-free.app/health): response failed', 'warning'),
+  ];
+  ws.history.episodes = incidentEpisodes(ws.history.events, now);
+  dash.state.workspace = ws;
+  await dash.open();
+  await workspace(page).toggle.click();
+  await expectWorkspaceOpen(page, true);
+
+  const incidents = page.locator('.incidents-card');
+  await expect(incidents).toBeVisible();
+  const rows = incidents.locator('li.incident');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('Active: Memory pressure elevated or available RAM low');
+  await expect(rows.nth(0)).toContainText('so far');
+  await expect(rows.nth(1)).toContainText('Recovered: ngrok-proxy-llm · Public ngrok route');
+  await expect(rows.nth(1)).toContainText('lasted 15m');
+  await expect(incidents).toContainText('durations are approximate');
+  // Incidents comes right before Recent events.
+  const headings = await page.locator('#workspace-diagnostics h3').allTextContents();
+  expect(headings.indexOf('Incidents')).toBe(headings.indexOf('Recent events') - 1);
+  await incidents.scrollIntoViewIfNeeded();
+  await expectNoSideScroll(page);
+
+  dash.state.workspace = healthyWorkspace();
+  dash.state.workspace.history.episodes = [];
+  await dash.refresh();
+  await expect(incidents).toContainText('No incidents in the last seven days');
 });
 
 // ---------- 4. #workspace link ----------
