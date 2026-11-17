@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS } from '../workspace-history.mjs';
+import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS, MEMORY_SETTLE_MS } from '../workspace-history.mjs';
 
 const DAY = 86400_000, START = 1_800_000_000_000;
 
@@ -28,19 +28,39 @@ function assertWellFormed(events, now) {
   for (let i = 1; i < events.length; i++) assert.ok(events[i - 1].timestamp >= events[i].timestamp, 'newest first');
 }
 
-test('workflow processes appearing or disappearing record nothing, but a stopped or zombie process still warns', async () => {
+test('workflow processes appearing or disappearing record nothing, but a process stopped or zombie for two readings warns once', async () => {
   const record = createWorkspaceHistory(), s = snapshot(START), w = s.diagnostics.agentWorkflow;
+  const processEvents = (result) => result.events.filter((e) => e.id.includes(':agent-process:')).map((e) => [e.title, e.level, e.timestamp]);
   await record(s);
   s.generatedAt += 30_000;
-  w.processes = [{ id: '10:1', pid: 10, name: 'gh', state: 'S' }, { id: '11:1', pid: 11, name: 'bun', state: 'S' }];
-  assert.ok(!(await record(s)).events.some((e) => e.id.includes(':agent-process:')));
+  w.processes = [{ id: '10:1', pid: 10, name: 'gh', state: 'S' }, { id: '11:1', pid: 11, name: 'bun', state: 'S' }, { id: '13:1', pid: 13, name: 'chrome-headless', state: 'S' }];
+  assert.deepEqual(processEvents(await record(s)), []);
+  // One zombie reading, then reaped: nothing is recorded.
   s.generatedAt += 30_000;
-  w.processes = [{ id: '11:1', pid: 11, name: 'bun', state: 'Z' }, { id: '12:1', pid: 12, name: 'git', state: 'S' }];
-  const result = await record(s);
-  assert.deepEqual(result.events.filter((e) => e.id.includes(':agent-process:')).map((e) => [e.title, e.level]), [['Workflow process stopped or zombie: bun (#11)', 'warning']]);
+  w.processes = [{ id: '11:1', pid: 11, name: 'bun', state: 'Z' }, { id: '12:1', pid: 12, name: 'git', state: 'S' }, { id: '13:1', pid: 13, name: 'chrome-headless', state: 'Z' }];
+  assert.deepEqual(processEvents(await record(s)), []);
+  s.generatedAt += 30_000;
+  w.processes = [{ id: '11:1', pid: 11, name: 'bun', state: 'Z' }];
+  const second = s.generatedAt;
+  assert.deepEqual(processEvents(await record(s)), [['Workflow process stopped or zombie: bun (#11)', 'warning', second]]);
+  // Still a zombie, or now stopped instead: the same stretch, so no second event.
+  s.generatedAt += 30_000;
+  assert.equal(processEvents(await record(s)).length, 1);
+  s.generatedAt += 30_000;
+  w.processes = [{ id: '11:1', pid: 11, name: 'bun', state: 'T' }];
+  assert.equal(processEvents(await record(s)).length, 1);
+  // Running again and then a zombie for two readings is a new stretch.
+  s.generatedAt += 30_000;
+  w.processes = [{ id: '11:1', pid: 11, name: 'bun', state: 'S' }];
+  await record(s);
+  s.generatedAt += 30_000;
+  w.processes = [{ id: '11:1', pid: 11, name: 'bun', state: 'Z' }];
+  await record(s);
+  s.generatedAt += 30_000;
+  assert.equal(processEvents(await record(s)).length, 2);
   s.generatedAt += 30_000;
   w.processes = [];
-  assert.equal((await record(s)).events.filter((e) => e.id.includes(':agent-process:')).length, 1);
+  assert.equal(processEvents(await record(s)).length, 2);
 });
 
 test('a day-one service failure and recovery survive seven days of routine job status changes', async (t) => {
@@ -179,6 +199,9 @@ test('each condition the recorder emits pairs its failure and recovery into one 
   s.services[0].state = 'running'; d.healthChecks[0].state = 'healthy'; d.disks[0].usedPct = 40;
   s.autoUpdate = { state: 'ok', timerActive: true, lastExitStatus: 0 }; d.agentWorkflow.timerActive = true;
   d.backup = { state: 'success', finishedAt: recover, lastSuccessAt: recover };
+  await record(s);
+  // Memory is recorded as recovered once it has stayed healthy for the settle time, dated to the first healthy reading.
+  s.generatedAt = recover + MEMORY_SETTLE_MS;
   const { episodes, events } = await record(s);
   const keys = ['internet', 'network', 'memory', 't3code.service', 't3-local', '/mnt/nas', 'auto-update', 'auto-update-timer', 'agent-timer', 'backup'];
   assert.deepEqual(episodes.map((e) => e.key).sort(), [...keys].sort());
@@ -224,6 +247,8 @@ test('restarts, OOM kills, link drops, zombie processes and pump failures are on
   await record(s);
   s.generatedAt += MIN;
   w.processes = [{ id: '9:1', pid: 9, name: 'bun', state: 'Z' }];
+  await record(s);
+  s.generatedAt += MIN;
   const { episodes } = await record(s);
   assert.deepEqual(episodes.map((e) => e.title).sort(), ['Agent pipeline pump failed', 'Linux killed a process because memory ran out', 'Network link dropped 2 time(s) between readings', 'T3 Code restarted', 'Workflow process stopped or zombie: bun (#9)']);
   for (const episode of episodes) {
@@ -321,4 +346,148 @@ test('a history file from the previous build loads unchanged and gains episodes 
   const stored = JSON.parse(await readFile(file, 'utf8'));
   assert.deepEqual(Object.keys(stored).sort(), ['events', 'lastSuccessAt', 'previous', 'samples', 'startedAt', 'version']);
   assert.deepEqual(stored.events, events);
+});
+
+// ---------- Memory settle time ----------
+const SEC = 1000;
+function setMemory(s, level) {
+  if (level === 'unknown') { s.memory = null; s.diagnostics.pressure.memory = null; return s; }
+  s.memory = { usedPct: { healthy: 50, warning: 92, critical: 97 }[level] };
+  s.diagnostics.pressure.memory = { some: { avg10: 0 }, full: { avg10: 0 } };
+  return s;
+}
+const memoryEvents = (result) => result.events.filter((e) => e.id.includes(':memory:')).map((e) => [e.title, e.level, e.timestamp]).reverse();
+const OPENED = 'Memory pressure elevated or available RAM low', RECOVERED = 'Memory pressure recovered';
+
+// Records one reading per [offset, level], offsets relative to START.
+async function readings(record, s, steps) {
+  let result;
+  for (const [offset, level] of steps) {
+    s.generatedAt = START + offset;
+    result = await record(setMemory(s, level));
+  }
+  return result;
+}
+
+test('memory flapping with healthy gaps under the settle time is one incident, recovered at the first reading of the final healthy stretch', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  const steps = [[0, 'healthy']];
+  let t = 30 * SEC;
+  for (let i = 0; i < 20; i++) {
+    steps.push([t, 'warning']); t += 30 * SEC;
+    // Healthy for up to 4.5 minutes, never the full settle time.
+    for (let j = 0; j <= i % 10; j++) { steps.push([t, 'healthy']); t += 30 * SEC; }
+  }
+  steps.push([t, 'warning']); t += 30 * SEC;
+  const healthyFrom = t;
+  for (; t <= healthyFrom + MEMORY_SETTLE_MS - 30 * SEC; t += 30 * SEC) steps.push([t, 'healthy']);
+  let result = await readings(record, s, steps);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', START + 30 * SEC]]);
+  // The reading that completes five healthy minutes records the recovery, dated to when pressure eased.
+  result = await readings(record, s, [[healthyFrom + MEMORY_SETTLE_MS, 'healthy'], [healthyFrom + MEMORY_SETTLE_MS + 30 * SEC, 'healthy']]);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', START + 30 * SEC], [RECOVERED, 'info', START + healthyFrom]]);
+  assert.deepEqual(byKey(result.episodes, 'memory').map((e) => [e.state, e.startedAt, e.endedAt, e.eventCount]), [['recovered', START + 30 * SEC, START + healthyFrom, 2]]);
+});
+
+test('memory escalating to critical while open is recorded once and keeps one critical episode', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  const result = await readings(record, s, [[0, 'healthy'], [30 * SEC, 'warning'], [60 * SEC, 'healthy'], [90 * SEC, 'critical'], [120 * SEC, 'warning'], [150 * SEC, 'critical'], [180 * SEC, 'warning']]);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', START + 30 * SEC], [OPENED, 'critical', START + 90 * SEC]]);
+  assert.deepEqual(byKey(result.episodes, 'memory').map((e) => [e.state, e.level, e.eventCount]), [['active', 'critical', 2]]);
+});
+
+test('a healthy stretch that reaches the settle time recovers even if the next reading is a warning, which opens a new incident', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  const steps = [[0, 'healthy'], [MIN, 'warning']];
+  for (let t = 2 * MIN; t <= 2 * MIN + MEMORY_SETTLE_MS; t += 30 * SEC) steps.push([t, 'healthy']);
+  steps.push([2 * MIN + MEMORY_SETTLE_MS + 30 * SEC, 'warning']);
+  const result = await readings(record, s, steps);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', START + MIN], [RECOVERED, 'info', START + 2 * MIN], [OPENED, 'warning', START + 2 * MIN + MEMORY_SETTLE_MS + 30 * SEC]]);
+  assert.deepEqual(byKey(result.episodes, 'memory').map((e) => e.state), ['active', 'recovered']);
+});
+
+test('unknown memory readings neither finish the settle time nor start a new incident', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  let result = await readings(record, s, [[0, 'healthy'], [MIN, 'warning'], [2 * MIN, 'unknown'], [3 * MIN, 'warning'], [4 * MIN, 'healthy'],
+    [5 * MIN, 'unknown'], [8 * MIN, 'unknown'], [10 * MIN, 'unknown']]);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', START + MIN]]);
+  // The settle time that started at 4 minutes is still running and completes on the next healthy reading.
+  result = await readings(record, s, [[10 * MIN + 30 * SEC, 'healthy']]);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', START + MIN], [RECOVERED, 'info', START + 4 * MIN]]);
+  // After a recovery, unknown then warning opens exactly one new incident.
+  result = await readings(record, s, [[11 * MIN, 'unknown'], [12 * MIN, 'warning'], [13 * MIN, 'unknown'], [14 * MIN, 'warning']]);
+  assert.equal(memoryEvents(result).filter(([title]) => title === OPENED).length, 2);
+});
+
+test('the recorded memory condition and its settle time survive a restart', async (t) => {
+  const file = await tempFile(t), s = snapshot(START);
+  await readings(createWorkspaceHistory({ file }), s, [[0, 'healthy'], [MIN, 'warning'], [2 * MIN, 'healthy'], [3 * MIN, 'healthy']]);
+  const stored = JSON.parse(await readFile(file, 'utf8'));
+  assert.deepEqual([stored.previous.memory, stored.previous.memoryRecorded, stored.previous.memoryHealthySince], ['healthy', 'warning', START + 2 * MIN]);
+  // A new recorder on the same file finishes the settle time without reopening the incident.
+  const record = createWorkspaceHistory({ file });
+  let result = await readings(record, s, [[5 * MIN, 'healthy']]);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', START + MIN]]);
+  result = await readings(record, s, [[7 * MIN, 'healthy']]);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', START + MIN], [RECOVERED, 'info', START + 2 * MIN]]);
+  // A restart while memory is still under pressure records no duplicate opening event.
+  await readings(record, s, [[8 * MIN, 'warning']]);
+  result = await readings(createWorkspaceHistory({ file }), s, [[9 * MIN, 'warning'], [10 * MIN, 'critical']]);
+  assert.deepEqual(memoryEvents(result).slice(2), [[OPENED, 'warning', START + 8 * MIN], [OPENED, 'critical', START + 10 * MIN]]);
+});
+
+test('a history file from the previous build, without a recorded memory condition, keeps recording', async (t) => {
+  const file = await tempFile(t), now = START;
+  const previous = { uptimeSec: 900, internet: 'online', network: 'Wi-Fi', disconnections: 1, memory: 'warning', oomKills: 0,
+    services: { 't3code.service': { state: 'running', startedAt: 100, restarts: 0 } }, health: {}, disks: {}, backup: 'unknown', backupFinished: null,
+    workflow: { pumpState: 'idle', paused: false, timerActive: true, processes: { '7:1': { pid: 7, name: 'bun', state: 'Z' } }, jobs: {} } };
+  const events = [ev(now - 2 * MIN, 'memory', OPENED, 'warning'), ev(now - 2 * MIN, 'agent-process:7:1', 'Workflow process stopped or zombie: bun (#7)', 'warning')];
+  await writeFile(file, JSON.stringify({ version: 1, events, samples: [], previous, lastSuccessAt: null, startedAt: now - DAY }));
+  const s = snapshot(now);
+  s.diagnostics.agentWorkflow.processes = [{ id: '7:1', pid: 7, name: 'bun', state: 'Z' }];
+  const record = createWorkspaceHistory({ file });
+  // The old live level stands in for the recorded condition: the open incident settles, and the zombie it already recorded is not repeated.
+  let result = await record(s);
+  assert.equal(result.events.filter((e) => e.id.includes(':agent-process:')).length, 1);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', now - 2 * MIN]]);
+  s.generatedAt = now + MEMORY_SETTLE_MS;
+  result = await record(s);
+  assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', now - 2 * MIN], [RECOVERED, 'info', now]]);
+  assert.deepEqual(byKey(result.episodes, 'memory').map((e) => [e.state, e.startedAt, e.endedAt]), [['recovered', now - 2 * MIN, now]]);
+  const stored = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(stored.version, 1);
+  assert.deepEqual([stored.previous.memoryRecorded, stored.previous.memoryHealthySince], ['healthy', null]);
+});
+
+test('two hours of memory flapping and transient zombies, as seen live on 2026-11-17, leave an HTTP-check incident in the history', async () => {
+  const record = createWorkspaceHistory(), s = richSnapshot(START), w = s.diagnostics.agentWorkflow, check = s.diagnostics.healthChecks[0];
+  // Deterministic pseudo-random gaps of 30–90 seconds between level flips.
+  let seed = 17;
+  const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  await record(s);
+  let t = 30 * SEC, level = 'warning', flipAt = t, readingsDone = 0, result;
+  while (t < 2 * 60 * MIN) {
+    if (t >= flipAt) { level = level === 'warning' ? 'healthy' : 'warning'; flipAt = t + 30 * SEC + Math.floor(random() * 3) * 30 * SEC; }
+    s.generatedAt = START + t;
+    setMemory(s, level);
+    // A headless browser child seen as a zombie for exactly one reading, eight times.
+    const pid = 1000 + readingsDone;
+    w.processes = readingsDone % 30 === 5 ? [{ id: `${pid}:1`, pid, name: 'chrome-headless', state: 'Z' }] : [];
+    if (readingsDone % 30 === 4) w.processes = [{ id: `${pid + 1}:1`, pid: pid + 1, name: 'chrome-headless', state: 'S' }];
+    check.state = t >= 40 * MIN && t < 45 * MIN ? 'unhealthy' : 'healthy';
+    result = await record(s);
+    t += 30 * SEC;
+    readingsDone++;
+  }
+  for (const end = t + MEMORY_SETTLE_MS; t <= end; t += 30 * SEC) {
+    s.generatedAt = START + t;
+    result = await record(setMemory(s, 'healthy'));
+  }
+  const memory = byKey(result.episodes, 'memory');
+  assert.ok(memory.length <= 3, `${memory.length} memory episodes`);
+  assert.deepEqual(memory.map((e) => e.state), ['recovered']);
+  assert.deepEqual(byKey(result.episodes, 't3-local').map((e) => [e.state, e.startedAt, e.endedAt]), [['recovered', START + 40 * MIN, START + 45 * MIN]]);
+  assert.ok(!result.events.some((e) => e.id.includes(':agent-process:')));
+  assert.ok(result.events.length < 10, `${result.events.length} events`);
+  assert.ok(result.events.some((e) => e.title === 'Computer monitoring started'));
 });

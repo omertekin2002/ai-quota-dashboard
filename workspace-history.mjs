@@ -11,6 +11,13 @@ export function memoryLevel(snapshot) {
 
 export const MAX_EVENTS = 100, MAX_ROUTINE_EVENTS = 20, EVENT_RETENTION_MS = 7 * 86400_000;
 
+// Memory pressure counts as recovered only after readings have stayed healthy this long. On a busy machine
+// the level flips every 30 seconds to 2 minutes, and each flip would otherwise be its own incident.
+export const MEMORY_SETTLE_MS = 5 * 60_000;
+
+const STOPPED_STATES = ['Z', 'T', 't'];
+const isPressure = (level) => level === 'warning' || level === 'critical';
+
 // An event's id is `${timestamp}:${key}:${title}`; the key says what it is about.
 function eventKey(event) {
   const prefix = `${event.timestamp}:`;
@@ -65,6 +72,8 @@ function incidentRole(key, event) {
  * - A warning or critical event opens an episode for its key (internet, network, memory, a service unit,
  *   an HTTP check, a disk, auto-update, the auto-update and agent pump timers), or adds to the open one.
  *   The next info event for that key (restored, recovered, running, storage available, active again) ends it.
+ *   The recorder writes a memory recovery only after MEMORY_SETTLE_MS (5 minutes) of healthy readings and
+ *   dates it to the first of them, so a flapping memory level stays one episode.
  * - `T7 backup failed` opens a backup episode, and only `T7 backup completed successfully` ends it.
  * - One-offs are single-event episodes in state 'once', never active: a service restart, an OOM kill, link
  *   drops, a stopped or zombie workflow process, and a failed pump (which records no recovery).
@@ -153,6 +162,8 @@ export function createWorkspaceHistory({ file = null } = {}) {
       health: Object.fromEntries(diagnostics.healthChecks.map((c) => [c.id, c.state])),
       disks: Object.fromEntries(diagnostics.disks.map((d) => [d.path, d.mounted === false ? 'missing' : d.readOnly ? 'read-only' : d.usedPct >= 90 ? 'low' : d.usedPct != null ? 'healthy' : 'unknown'])),
       backup: diagnostics.backup.state, backupFinished: diagnostics.backup.finishedAt,
+      // Replaced below once there is a previous reading to compare with.
+      memoryRecorded: memoryLevel(snapshot), memoryHealthySince: null,
     };
     const workflow = diagnostics.agentWorkflow;
     if (workflow) {
@@ -160,7 +171,7 @@ export function createWorkspaceHistory({ file = null } = {}) {
         pumpState: workflow.pumpState === 'unknown' ? previous?.workflow?.pumpState : workflow.pumpState,
         paused: workflow.paused ?? previous?.workflow?.paused,
         timerActive: workflow.timerActive ?? previous?.workflow?.timerActive,
-        processes: workflow.available ? Object.fromEntries(workflow.processes.map((p) => [p.id, { pid: p.pid, name: p.name, state: p.state }])) : previous?.workflow?.processes,
+        processes: workflow.available ? Object.fromEntries(workflow.processes.map((p) => [p.id, { pid: p.pid, name: p.name, state: p.state, reported: false }])) : previous?.workflow?.processes,
         jobs: workflow.jobsAvailable && !workflow.partial ? Object.fromEntries([...workflow.activeJobs, ...workflow.recentJobs].map((j) => [j.id, { status: j.status, stale: j.stale }])) : previous?.workflow?.jobs,
       };
       const before = previous?.workflow, after = current.workflow;
@@ -170,10 +181,17 @@ export function createWorkspaceHistory({ file = null } = {}) {
         if (typeof before.timerActive === 'boolean' && after.timerActive !== before.timerActive) add('agent-timer', after.timerActive ? 'Agent pump timer enabled' : 'Agent pump timer inactive', after.timerActive ? 'info' : 'warning');
         if (workflow.available && before.processes) {
           // Pipeline subprocesses come and go every minute and the live list is already on the page,
-          // so only a process that becomes stopped or zombie is worth an event.
+          // so only a process that stays stopped or zombie for two readings in a row is worth an event:
+          // headless browser children are often seen as zombies once, just before they are reaped.
           for (const [id, process] of Object.entries(after.processes)) {
             const old = before.processes[id];
-            if (old && ['Z', 'T', 't'].includes(process.state) && process.state !== old.state) add(`agent-process:${id}`, `Workflow process stopped or zombie: ${process.name} (#${process.pid})`, 'warning');
+            if (!old || !STOPPED_STATES.includes(process.state) || !STOPPED_STATES.includes(old.state)) continue;
+            // Older builds did not store `reported`; they recorded a process as soon as it stopped.
+            if (old.reported ?? true) process.reported = true;
+            else {
+              add(`agent-process:${id}`, `Workflow process stopped or zombie: ${process.name} (#${process.pid})`, 'warning');
+              process.reported = true;
+            }
           }
         }
         if (workflow.jobsAvailable && !workflow.partial && before.jobs) {
@@ -208,10 +226,30 @@ export function createWorkspaceHistory({ file = null } = {}) {
       else if (current.disconnections != null && previous.disconnections != null && current.disconnections > previous.disconnections) {
         add('link', `Network link dropped ${current.disconnections - previous.disconnections} time(s) between readings`, 'warning');
       }
-      if (current.memory !== previous.memory) {
-        if (['warning', 'critical'].includes(current.memory)) add('memory', 'Memory pressure elevated or available RAM low', current.memory);
-        else if (current.memory === 'healthy' && ['warning', 'critical'].includes(previous.memory)) add('memory', 'Memory pressure recovered');
+      // The recorded memory condition (`memoryRecorded`: the worst level of the open incident, or healthy or
+      // unknown) is kept apart from the live level, so a level flipping between readings stays one incident.
+      // `memoryHealthySince` is the first healthy reading of a settle time in progress. Files from older
+      // builds have neither, so the last live level stands in for the recorded condition the first time.
+      let memoryRecorded = previous.memoryRecorded ?? previous.memory ?? 'unknown', memoryHealthySince = previous.memoryHealthySince ?? null;
+      if (isPressure(current.memory)) {
+        if (!isPressure(memoryRecorded) || (current.memory === 'critical' && memoryRecorded !== 'critical')) {
+          add('memory', 'Memory pressure elevated or available RAM low', current.memory);
+          memoryRecorded = current.memory;
+        }
+        memoryHealthySince = null;
+      } else if (current.memory === 'healthy') {
+        if (!isPressure(memoryRecorded)) memoryRecorded = 'healthy';
+        else {
+          memoryHealthySince ??= now;
+          if (now - memoryHealthySince >= MEMORY_SETTLE_MS) {
+            add('memory', 'Memory pressure recovered', 'info', memoryHealthySince);
+            memoryRecorded = 'healthy';
+            memoryHealthySince = null;
+          }
+        }
       }
+      // An unknown reading changes nothing: it neither ends the settle time nor opens a new incident.
+      Object.assign(current, { memoryRecorded, memoryHealthySince });
       if (current.oomKills != null && previous.oomKills != null && current.oomKills > previous.oomKills) add('oom', 'Linux killed a process because memory ran out', 'critical');
       for (const service of snapshot.services) {
         const before = previous.services?.[service.unit], after = current.services[service.unit];
