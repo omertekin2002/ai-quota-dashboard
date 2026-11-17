@@ -202,6 +202,12 @@
   .event-row.critical .health-dot { background: var(--critical); }
   .event-title { font-size: 12px; overflow-wrap: anywhere; }
   .event-time { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-muted); }
+  .incident-state { font-weight: 600; }
+  .incident-state.warning { color: var(--warning-ink); }
+  .incident-state.critical { color: var(--critical-ink); }
+  .incident-state.healthy { color: var(--healthy); }
+  .incident-state.once { color: var(--ink-2); }
+  .incident-caveat { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-muted); font-style: italic; }
   @media (max-width: 700px) {
     #workspace-meta, #pipeline-meta { order: 3; flex-basis: 100%; margin-left: 0; }
     #workspace-toggle, #pipeline-toggle { margin-left: auto; }
@@ -661,8 +667,28 @@
       <article class="diagnostic-card"><h3>Storage & backup</h3>${disks}<div class="diagnostic-row"><span>T7 backup</span><span class="diagnostic-status ${backupLevel}">${esc(backupLabel)}</span></div><p class="diagnostic-detail">${esc(backupDetail)}</p></article>
       <article class="diagnostic-card"><h3>Connection quality</h3><div class="diagnostic-row"><span>Wi-Fi signal</span><span>${workspace.internet.signalPct != null ? `${workspace.internet.signalPct}%` : '—'}</span></div>
         <div class="diagnostic-row"><span>Wi-Fi link rate</span><span>${esc(workspace.internet.linkRate || '—')}</span></div><div class="diagnostic-row"><span>Tailscale</span><span>${esc(tailscale)}</span></div>${renderLatency(history?.samples || [])}<p class="diagnostic-detail">Link rate is the Wi-Fi connection rate. Internet timings are HTTPS response times from this laptop.</p></article>
+      ${renderIncidents(history?.episodes)}
       <article class="diagnostic-card"><h3>Recent events</h3><ul class="diagnostic-list">${events || '<li class="diagnostic-detail">No recent events</li>'}</ul><p class="diagnostic-detail">Latest 10 events · sampled every 30 seconds, even with this page closed. ${history?.persisted === false ? 'History could not be saved.' : 'History is retained for seven days.'}</p></article>
     </div>`;
+  }
+
+  // Episodes built by incidentEpisodes() in workspace-history.mjs: active ones first, then the newest.
+  function renderIncidents(episodes) {
+    if (!Array.isArray(episodes)) return ''; // a server from before /api/workspace reported them
+    const shown = episodes.slice(0, 10);
+    const time = (ms) => `<time datetime="${new Date(ms).toISOString()}">${esc(fmtFull(ms))}</time>`;
+    const rows = shown.map((e) => {
+      const level = e.level === 'critical' ? 'critical' : e.level === 'warning' ? 'warning' : '';
+      const [label, labelClass, when] = e.state === 'active' ? ['Active', level, `Active since ${time(e.startedAt)} · ${esc(fmtDur((Date.now() - e.startedAt) / 1000))} so far`]
+        : e.state === 'once' ? ['Observed once', 'once', `Observed once at ${time(e.startedAt)}`]
+        : e.startedAt == null ? ['Recovered', 'healthy', `Recovered at ${time(e.endedAt)}`]
+        : ['Recovered', 'healthy', `${time(e.startedAt)} → ${time(e.endedAt)} · lasted ${esc(fmtDur((e.endedAt - e.startedAt) / 1000))}`];
+      const updates = e.eventCount > 2 || (e.state === 'active' && e.eventCount > 1) ? ` · ${e.eventCount} changes recorded` : '';
+      const caveats = (e.caveats || []).map((c) => `<span class="incident-caveat">${esc(c)}</span>`).join('');
+      return `<li class="event-row incident ${e.state === 'recovered' ? '' : level}"><span class="health-dot" aria-hidden="true"></span><div class="event-title"><span class="incident-state ${labelClass}">${label}:</span> ${esc(e.title)}<span class="event-time">${when}${updates}</span>${caveats}</div></li>`;
+    }).join('');
+    const more = episodes.length > shown.length ? `Showing ${shown.length} of ${episodes.length} incidents. ` : '';
+    return `<article class="diagnostic-card incidents-card"><h3>Incidents</h3><ul class="diagnostic-list">${rows || '<li class="diagnostic-detail">No incidents in the last seven days</li>'}</ul><p class="diagnostic-detail">${more}A failure and its recovery form one incident. Readings are sampled every 30 seconds, so durations are approximate and brief changes can fall between readings.</p></article>`;
   }
 
   function renderAgentWorkflow(workflow) {

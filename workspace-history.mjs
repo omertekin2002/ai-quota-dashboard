@@ -17,9 +17,16 @@ function eventKey(event) {
   return typeof event.id === 'string' && event.id.startsWith(prefix) ? event.id.slice(prefix.length) : '';
 }
 
-// Info-level agent pipeline activity (job status changes, heartbeat recoveries, pause/resume, timer enabled).
+// The key alone, without the title that follows it in the id.
+function keyOf(event) {
+  const rest = eventKey(event), suffix = `:${event.title}`;
+  return rest.endsWith(suffix) ? rest.slice(0, -suffix.length) : '';
+}
+
+// Info-level agent pipeline activity (job status changes, heartbeat recoveries, pause/resume). The pump timer
+// being enabled again is not routine: it ends an incident, so it must outlive the warning that opened it.
 export function isRoutineEvent(event) {
-  return event.level === 'info' && eventKey(event).startsWith('agent-');
+  return event.level === 'info' && eventKey(event).startsWith('agent-') && !eventKey(event).startsWith('agent-timer:');
 }
 
 // Process start/exit events recorded by older builds; they are no longer kept.
@@ -36,6 +43,82 @@ export function pruneEvents(events, now) {
   const main = recent.filter((e) => !isRoutineEvent(e)).slice(0, MAX_EVENTS);
   const routine = recent.filter(isRoutineEvent).slice(0, Math.min(MAX_ROUTINE_EVENTS, MAX_EVENTS - main.length));
   return [...main, ...routine].sort((a, b) => b.timestamp - a.timestamp);
+}
+
+const LEVEL_RANK = { info: 0, warning: 1, critical: 2 };
+
+// How an event takes part in incidents: 'open' starts or extends one, 'close' ends one, 'once' is a one-off,
+// 'gap' marks a restart or monitoring gap, and null is not about incidents.
+function incidentRole(key, event) {
+  if (key === 'boot' || key === 'monitor') return 'gap';
+  // The Agent pipeline panel owns jobs; pause/resume is a choice, not an incident.
+  if (!key || key.startsWith('agent-job:') || key === 'agent-pipeline') return null;
+  if (['agent-pump', 'oom', 'link'].includes(key) || key.startsWith('agent-process:')) return event.level === 'info' ? null : 'once';
+  if (key === 'backup') return event.title === 'T7 backup failed' ? 'open' : event.title === 'T7 backup completed successfully' ? 'close' : null;
+  // A service that restarted shares its key (the unit) with that service's state changes.
+  if (event.level !== 'info' && / restarted$/.test(event.title)) return 'once';
+  return event.level === 'info' ? 'close' : 'open';
+}
+
+/**
+ * Groups retained events into incidents (episodes), newest first with active ones on top. Rules:
+ * - A warning or critical event opens an episode for its key (internet, network, memory, a service unit,
+ *   an HTTP check, a disk, auto-update, the auto-update and agent pump timers), or adds to the open one.
+ *   The next info event for that key (restored, recovered, running, storage available, active again) ends it.
+ * - `T7 backup failed` opens a backup episode, and only `T7 backup completed successfully` ends it.
+ * - One-offs are single-event episodes in state 'once', never active: a service restart, an OOM kill, link
+ *   drops, a stopped or zombie workflow process, and a failed pump (which records no recovery).
+ * - Not incidents: job events (the Agent pipeline panel owns them), pause/resume, backup starts and
+ *   successes with nothing to end, and the `boot`/`monitor` markers.
+ * - A `boot` or `monitor` event after an episode starts and no later than its end adds a caveat: the
+ *   recovery may only have been seen after the computer or monitoring came back. No cause is implied.
+ * - A recovery that is the oldest retained event for its key ends an episode whose start was pruned:
+ *   it is 'recovered' with startedAt null. `Network connected or changed` is skipped there, because it
+ *   also records a switch between two networks.
+ */
+export function incidentEpisodes(events, now) {
+  const chronological = events
+    .filter((e) => e && Number.isFinite(e.timestamp) && e.timestamp <= now)
+    .map((event, index) => ({ event, index }))
+    // Oldest first; events from one reading share a timestamp and keep their recorded order.
+    .sort((a, b) => a.event.timestamp - b.event.timestamp || a.index - b.index)
+    .map(({ event }) => event);
+  const episodes = [], open = new Map(), seen = new Set(), gaps = [];
+  const worst = (a, b) => ((LEVEL_RANK[b] ?? 0) > (LEVEL_RANK[a] ?? 0) ? b : a);
+  for (const event of chronological) {
+    const key = keyOf(event), role = incidentRole(key, event);
+    if (role === 'gap') gaps.push(event);
+    if (!role || role === 'gap') continue;
+    const first = !seen.has(key);
+    seen.add(key);
+    if (role === 'once') {
+      episodes.push({ key, title: event.title, level: event.level, startedAt: event.timestamp, endedAt: event.timestamp, state: 'once', eventCount: 1, caveats: [], lastAt: event.timestamp });
+    } else if (role === 'open') {
+      const episode = open.get(key);
+      if (episode) Object.assign(episode, { level: worst(episode.level, event.level), eventCount: episode.eventCount + 1, lastAt: event.timestamp });
+      else {
+        const created = { key, title: event.title, level: event.level, startedAt: event.timestamp, endedAt: null, state: 'active', eventCount: 1, caveats: [], lastAt: event.timestamp };
+        open.set(key, created);
+        episodes.push(created);
+      }
+    } else {
+      const episode = open.get(key);
+      if (episode) {
+        Object.assign(episode, { endedAt: event.timestamp, state: 'recovered', eventCount: episode.eventCount + 1, lastAt: event.timestamp });
+        open.delete(key);
+      } else if (first && key !== 'network' && key !== 'backup') {
+        episodes.push({ key, title: event.title, level: event.level, startedAt: null, endedAt: event.timestamp, state: 'recovered', eventCount: 1, caveats: ['Start not retained; it is older than the kept history'], lastAt: event.timestamp });
+      }
+    }
+  }
+  for (const episode of episodes) {
+    if (episode.state === 'once' || episode.startedAt == null) continue;
+    const end = episode.endedAt ?? now, inside = gaps.filter((g) => g.timestamp > episode.startedAt && g.timestamp <= end);
+    if (inside.some((g) => keyOf(g) === 'boot')) episode.caveats.push('Computer restarted during this incident; the recovery may only have been seen once it was back');
+    if (inside.some((g) => keyOf(g) === 'monitor')) episode.caveats.push('Monitoring restarted during this incident; the recovery may only have been seen once it resumed');
+  }
+  const rank = (e) => (e.state === 'active' ? 1 : 0);
+  return episodes.sort((a, b) => rank(b) - rank(a) || b.lastAt - a.lastAt).map(({ lastAt, ...episode }) => episode);
 }
 
 export function createWorkspaceHistory({ file = null } = {}) {
@@ -169,6 +252,6 @@ export function createWorkspaceHistory({ file = null } = {}) {
         await unlink(`${file}.tmp`).catch(() => {});
       }
     }
-    return { events: [...events], samples: [...samples], lastSuccessAt, startedAt, persisted };
+    return { events: [...events], episodes: incidentEpisodes(events, now), samples: [...samples], lastSuccessAt, startedAt, persisted };
   };
 }
