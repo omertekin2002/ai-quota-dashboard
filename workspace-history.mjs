@@ -237,24 +237,30 @@ export function createWorkspaceHistory({ file = null } = {}) {
       if (current.network !== previous.network) add('network', current.network ? 'Network connected or changed' : 'Network disconnected', current.network ? 'info' : 'warning');
       // Link drops are one incident per burst. `link` is the open incident: its drop count, the reading that saw
       // the last drop, and the first reading after it (null until there is one). Files from older builds have
-      // none, so they start without an open incident. A counter that goes down (reboot, interface reset)
-      // re-baselines without a drop, and a network change is recorded by its own event, not as drops.
+      // none, so they start without an open incident. A network change is recorded by its own event, not as drops.
       let link = previous.link ? { ...previous.link } : null;
-      const readable = snapshot.internet.disconnections != null && previous.disconnections != null;
-      const drops = readable && current.network === previous.network ? Math.max(0, current.disconnections - previous.disconnections) : 0;
+      const live = snapshot.internet.disconnections;
+      // A counter can be compared with the last one only on the same network, and only if it did not go down.
+      const comparable = live != null && previous.disconnections != null && current.network === previous.network && live >= previous.disconnections;
+      const drops = comparable ? live - previous.disconnections : 0;
       const plural = (n) => `${n} drop${n === 1 ? '' : 's'}`;
       if (drops > 0) {
         // Drops seen after a gap in readings may have happened at any time in it, so they continue the open
-        // incident: only a readable, unchanged counter confirms that the link has been steady.
+        // incident: only a comparable, unchanged counter confirms that the link has been steady.
         if (link) Object.assign(link, { drops: link.drops + drops, lastDropAt: now, steadySince: null });
         else {
           add('link', `Network link unstable: dropped ${drops} time(s)`, 'warning');
           link = { drops, lastDropAt: now, steadySince: null };
         }
-      } else if (link && snapshot.internet.disconnections != null) {
+      } else if (link && live != null && !comparable) {
+        // A counter that went down (reboot, interface reset), a new network or a missing baseline re-baselines
+        // without a drop. It cannot confirm the time since the last reading was steady, so the settle time
+        // starts again from this reading.
+        Object.assign(link, { rebaselinedAt: now, steadySince: null });
+      } else if (link && comparable) {
         // An unreadable counter neither extends nor ends the incident.
         link.steadySince ??= now;
-        if (now - link.lastDropAt >= LINK_SETTLE_MS) {
+        if (now - Math.max(link.lastDropAt, link.rebaselinedAt ?? -Infinity) >= LINK_SETTLE_MS) {
           add('link', `Network link steady again after ${plural(link.drops)}`, 'info', link.steadySince);
           link = null;
         }

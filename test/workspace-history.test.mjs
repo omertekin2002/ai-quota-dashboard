@@ -569,6 +569,13 @@ test('unreadable link counters neither end nor reopen the incident, and a fallin
   assert.equal(linkEvents(result).length, 4);
   result = await linkReadings(record, s, [[104 * MIN, 1]]);
   assert.deepEqual(linkEvents(result).at(-1), [UNSTABLE(1), 'warning', START + 104 * MIN]);
+  // A reset during an open incident cannot confirm the quiet time before it: the settle time starts again from the reset.
+  result = await linkReadings(record, s, [[105 * MIN, 1], [104 * MIN + LINK_SETTLE_MS, 0]]);
+  assert.equal(linkEvents(result).length, 5);
+  result = await linkReadings(record, s, [[104 * MIN + LINK_SETTLE_MS + 30 * SEC, 0], [104 * MIN + 2 * LINK_SETTLE_MS - 30 * SEC, 0]]);
+  assert.equal(linkEvents(result).length, 5);
+  result = await linkReadings(record, s, [[104 * MIN + 2 * LINK_SETTLE_MS, 0]]);
+  assert.deepEqual(linkEvents(result).at(-1), [STEADY(1), 'info', START + 104 * MIN + LINK_SETTLE_MS + 30 * SEC]);
 });
 
 test('a network change records no link drops and does not reopen a link incident', async () => {
@@ -578,6 +585,16 @@ test('a network change records no link drops and does not reopen a link incident
   const result = await linkReadings(record, s, [[MIN, 0], [2 * MIN, 0]]);
   assert.deepEqual(linkEvents(result), []);
   assert.ok(result.events.some((e) => e.title === 'Network connected or changed'));
+});
+
+test('a network change during an open link incident restarts its settle time instead of confirming it', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  await linkReadings(record, s, [[0, 10], [MIN, 11], [2 * MIN, 11]]);
+  s.internet.networkName = 'Other';
+  let result = await linkReadings(record, s, [[MIN + LINK_SETTLE_MS, 3]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN]]);
+  result = await linkReadings(record, s, [[MIN + LINK_SETTLE_MS + 30 * SEC, 3], [MIN + 2 * LINK_SETTLE_MS, 3]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN], [STEADY(1), 'info', START + MIN + LINK_SETTLE_MS + 30 * SEC]]);
 });
 
 test('an unreadable counter on a new network does not carry the old network\'s counter as its baseline', async () => {
