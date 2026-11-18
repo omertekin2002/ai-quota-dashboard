@@ -575,6 +575,14 @@ test('a network change records no link drops and does not reopen a link incident
   assert.ok(result.events.some((e) => e.title === 'Network connected or changed'));
 });
 
+test('an unreadable counter on a new network does not carry the old network\'s counter as its baseline', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  await linkReadings(record, s, [[0, 5]]);
+  s.internet.networkName = 'Other';
+  const result = await linkReadings(record, s, [[MIN, null], [2 * MIN, 100], [3 * MIN, 100]]);
+  assert.deepEqual(linkEvents(result), []);
+});
+
 test('the open link incident, its drop count and settle time survive a restart of the recorder', async (t) => {
   const file = await tempFile(t), s = snapshot(START);
   await linkReadings(createWorkspaceHistory({ file }), s, [[0, 10], [MIN, 12], [2 * MIN, 13], [3 * MIN, 13]]);

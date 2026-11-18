@@ -168,7 +168,8 @@ export function createWorkspaceHistory({ file = null } = {}) {
     const current = {
       uptimeSec: snapshot.uptimeSec, internet: snapshot.internet.state, network: snapshot.internet.networkName,
       // An unreadable counter keeps the last known value, so drops during the gap are counted once it is back.
-      disconnections: snapshot.internet.disconnections ?? previous?.disconnections ?? null, memory: memoryLevel(snapshot), oomKills: diagnostics.oomKills,
+      // The counter belongs to one network device, so a network change drops the old baseline.
+      disconnections: snapshot.internet.disconnections ?? (previous?.network === snapshot.internet.networkName ? previous?.disconnections : null) ?? null, memory: memoryLevel(snapshot), oomKills: diagnostics.oomKills,
       services: Object.fromEntries(snapshot.services.map((s) => [s.unit, { state: s.state, startedAt: s.startedAt, restarts: s.automaticRestarts }])),
       health: Object.fromEntries(diagnostics.healthChecks.map((c) => [c.id, c.state])),
       disks: Object.fromEntries(diagnostics.disks.map((d) => [d.path, d.mounted === false ? 'missing' : d.readOnly ? 'read-only' : d.usedPct >= 90 ? 'low' : d.usedPct != null ? 'healthy' : 'unknown'])),
