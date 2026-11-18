@@ -559,11 +559,16 @@ test('unreadable link counters neither end nor reopen the incident, and a fallin
   // The settle time starts at the first readable reading after the last drop; unreadable ones inside it change nothing.
   result = await linkReadings(record, s, [[32 * MIN, 13], [33 * MIN, null], [40 * MIN, null], [31 * MIN + LINK_SETTLE_MS, null], [31 * MIN + LINK_SETTLE_MS + 30 * SEC, 13]]);
   assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN], [STEADY(3), 'info', START + 32 * MIN]]);
+  // Drops that show up after a long unreadable stretch, even one that began with a quiet reading, continue the incident.
+  result = await linkReadings(record, s, [[50 * MIN, 14], [50 * MIN + 30 * SEC, 14], [51 * MIN, null], [70 * MIN, null], [71 * MIN, 24]]);
+  assert.deepEqual(linkEvents(result).slice(2), [[UNSTABLE(1), 'warning', START + 50 * MIN]]);
+  result = await linkReadings(record, s, [[71 * MIN + 30 * SEC, 24], [71 * MIN + LINK_SETTLE_MS, 24]]);
+  assert.deepEqual(linkEvents(result).slice(2), [[UNSTABLE(1), 'warning', START + 50 * MIN], [STEADY(11), 'info', START + 71 * MIN + 30 * SEC]]);
   // A reset counter (reboot, interface reset) re-baselines without a drop; the next rise counts from the new value.
-  result = await linkReadings(record, s, [[60 * MIN, 2], [61 * MIN, null], [62 * MIN, 0], [63 * MIN, 0]]);
-  assert.equal(linkEvents(result).length, 2);
-  result = await linkReadings(record, s, [[64 * MIN, 1]]);
-  assert.deepEqual(linkEvents(result).at(-1), [UNSTABLE(1), 'warning', START + 64 * MIN]);
+  result = await linkReadings(record, s, [[100 * MIN, 2], [101 * MIN, null], [102 * MIN, 0], [103 * MIN, 0]]);
+  assert.equal(linkEvents(result).length, 4);
+  result = await linkReadings(record, s, [[104 * MIN, 1]]);
+  assert.deepEqual(linkEvents(result).at(-1), [UNSTABLE(1), 'warning', START + 104 * MIN]);
 });
 
 test('a network change records no link drops and does not reopen a link incident', async () => {

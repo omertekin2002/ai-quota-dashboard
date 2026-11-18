@@ -243,13 +243,9 @@ export function createWorkspaceHistory({ file = null } = {}) {
       const readable = snapshot.internet.disconnections != null && previous.disconnections != null;
       const drops = readable && current.network === previous.network ? Math.max(0, current.disconnections - previous.disconnections) : 0;
       const plural = (n) => `${n} drop${n === 1 ? '' : 's'}`;
-      const settled = () => link?.steadySince != null && now - link.lastDropAt >= LINK_SETTLE_MS;
       if (drops > 0) {
-        // A drop after the settle time (seen only after a gap in readings) starts a new incident.
-        if (settled()) {
-          add('link', `Network link steady again after ${plural(link.drops)}`, 'info', link.steadySince);
-          link = null;
-        }
+        // Drops seen after a gap in readings may have happened at any time in it, so they continue the open
+        // incident: only a readable, unchanged counter confirms that the link has been steady.
         if (link) Object.assign(link, { drops: link.drops + drops, lastDropAt: now, steadySince: null });
         else {
           add('link', `Network link unstable: dropped ${drops} time(s)`, 'warning');
@@ -258,7 +254,7 @@ export function createWorkspaceHistory({ file = null } = {}) {
       } else if (link && snapshot.internet.disconnections != null) {
         // An unreadable counter neither extends nor ends the incident.
         link.steadySince ??= now;
-        if (settled()) {
+        if (now - link.lastDropAt >= LINK_SETTLE_MS) {
           add('link', `Network link steady again after ${plural(link.drops)}`, 'info', link.steadySince);
           link = null;
         }
