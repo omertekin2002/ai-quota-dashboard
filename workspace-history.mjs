@@ -15,8 +15,14 @@ export const MAX_EVENTS = 100, MAX_ROUTINE_EVENTS = 20, EVENT_RETENTION_MS = 7 *
 // the level flips every 30 seconds to 2 minutes, and each flip would otherwise be its own incident.
 export const MEMORY_SETTLE_MS = 5 * 60_000;
 
+// A Wi-Fi link that keeps dropping counts as steady again only after this long without a new drop. Live, drops
+// come in bursts 30 seconds to 2 minutes apart, separated by quiet hours; each burst is one incident.
+export const LINK_SETTLE_MS = 15 * 60_000;
+
 const STOPPED_STATES = ['Z', 'T', 't'];
 const isPressure = (level) => level === 'warning' || level === 'critical';
+// Older builds recorded each rise of the link-drop counter as its own event.
+const isLegacyLinkDrop = (event) => /^Network link dropped \d+ time\(s\) between readings$/.test(event.title);
 
 // An event's id is `${timestamp}:${key}:${title}`; the key says what it is about.
 function eventKey(event) {
@@ -60,7 +66,8 @@ function incidentRole(key, event) {
   if (key === 'boot' || key === 'monitor') return 'gap';
   // The Agent pipeline panel owns jobs; pause/resume is a choice, not an incident.
   if (!key || key.startsWith('agent-job:') || key === 'agent-pipeline') return null;
-  if (['agent-pump', 'oom', 'link'].includes(key) || key.startsWith('agent-process:')) return event.level === 'info' ? null : 'once';
+  if (key === 'link' && isLegacyLinkDrop(event)) return 'once';
+  if (['agent-pump', 'oom'].includes(key) || key.startsWith('agent-process:')) return event.level === 'info' ? null : 'once';
   if (key === 'backup') return event.title === 'T7 backup failed' ? 'open' : event.title === 'T7 backup completed successfully' ? 'close' : null;
   // A service that restarted shares its key (the unit) with that service's state changes.
   if (event.level !== 'info' && / restarted$/.test(event.title)) return 'once';
@@ -73,10 +80,13 @@ function incidentRole(key, event) {
  *   an HTTP check, a disk, auto-update, the auto-update and agent pump timers), or adds to the open one.
  *   The next info event for that key (restored, recovered, running, storage available, active again) ends it.
  *   The recorder writes a memory recovery only after MEMORY_SETTLE_MS (5 minutes) of healthy readings and
- *   dates it to the first of them, so a flapping memory level stays one episode.
+ *   dates it to the first of them, so a flapping memory level stays one episode. Link drops work the same
+ *   way: the first drop of a burst opens a link episode, and the recorder ends it after LINK_SETTLE_MS
+ *   (15 minutes) without a new drop, dated to the first reading after the last drop.
  * - `T7 backup failed` opens a backup episode, and only `T7 backup completed successfully` ends it.
  * - One-offs are single-event episodes in state 'once', never active: a service restart, an OOM kill, link
- *   drops, a stopped or zombie workflow process, and a failed pump (which records no recovery).
+ *   drops recorded per reading by older builds, a stopped or zombie workflow process, and a failed pump
+ *   (which records no recovery).
  * - Not incidents: job events (the Agent pipeline panel owns them), pause/resume, backup starts and
  *   successes with nothing to end, and the `boot`/`monitor` markers.
  * - A `boot` or `monitor` event after an episode starts and no later than its end adds a caveat: the
@@ -157,7 +167,8 @@ export function createWorkspaceHistory({ file = null } = {}) {
     const diagnostics = snapshot.diagnostics;
     const current = {
       uptimeSec: snapshot.uptimeSec, internet: snapshot.internet.state, network: snapshot.internet.networkName,
-      disconnections: snapshot.internet.disconnections, memory: memoryLevel(snapshot), oomKills: diagnostics.oomKills,
+      // An unreadable counter keeps the last known value, so drops during the gap are counted once it is back.
+      disconnections: snapshot.internet.disconnections ?? previous?.disconnections ?? null, memory: memoryLevel(snapshot), oomKills: diagnostics.oomKills,
       services: Object.fromEntries(snapshot.services.map((s) => [s.unit, { state: s.state, startedAt: s.startedAt, restarts: s.automaticRestarts }])),
       health: Object.fromEntries(diagnostics.healthChecks.map((c) => [c.id, c.state])),
       disks: Object.fromEntries(diagnostics.disks.map((d) => [d.path, d.mounted === false ? 'missing' : d.readOnly ? 'read-only' : d.usedPct >= 90 ? 'low' : d.usedPct != null ? 'healthy' : 'unknown'])),
@@ -223,9 +234,35 @@ export function createWorkspaceHistory({ file = null } = {}) {
       if (current.uptimeSec < previous.uptimeSec) add('boot', 'Computer restarted');
       if (current.internet !== previous.internet) add('internet', `Internet ${current.internet === 'online' ? 'connection restored' : `became ${current.internet}`}`, current.internet === 'online' ? 'info' : 'warning');
       if (current.network !== previous.network) add('network', current.network ? 'Network connected or changed' : 'Network disconnected', current.network ? 'info' : 'warning');
-      else if (current.disconnections != null && previous.disconnections != null && current.disconnections > previous.disconnections) {
-        add('link', `Network link dropped ${current.disconnections - previous.disconnections} time(s) between readings`, 'warning');
+      // Link drops are one incident per burst. `link` is the open incident: its drop count, the reading that saw
+      // the last drop, and the first reading after it (null until there is one). Files from older builds have
+      // none, so they start without an open incident. A counter that goes down (reboot, interface reset)
+      // re-baselines without a drop, and a network change is recorded by its own event, not as drops.
+      let link = previous.link ? { ...previous.link } : null;
+      const readable = snapshot.internet.disconnections != null && previous.disconnections != null;
+      const drops = readable && current.network === previous.network ? Math.max(0, current.disconnections - previous.disconnections) : 0;
+      const plural = (n) => `${n} drop${n === 1 ? '' : 's'}`;
+      const settled = () => link?.steadySince != null && now - link.lastDropAt >= LINK_SETTLE_MS;
+      if (drops > 0) {
+        // A drop after the settle time (seen only after a gap in readings) starts a new incident.
+        if (settled()) {
+          add('link', `Network link steady again after ${plural(link.drops)}`, 'info', link.steadySince);
+          link = null;
+        }
+        if (link) Object.assign(link, { drops: link.drops + drops, lastDropAt: now, steadySince: null });
+        else {
+          add('link', `Network link unstable: dropped ${drops} time(s)`, 'warning');
+          link = { drops, lastDropAt: now, steadySince: null };
+        }
+      } else if (link && snapshot.internet.disconnections != null) {
+        // An unreadable counter neither extends nor ends the incident.
+        link.steadySince ??= now;
+        if (settled()) {
+          add('link', `Network link steady again after ${plural(link.drops)}`, 'info', link.steadySince);
+          link = null;
+        }
       }
+      current.link = link;
       // The recorded memory condition (`memoryRecorded`: the worst level of the open incident, or healthy or
       // unknown) is kept apart from the live level, so a level flipping between readings stays one incident.
       // `memoryHealthySince` is the first healthy reading of a settle time in progress. Files from older
