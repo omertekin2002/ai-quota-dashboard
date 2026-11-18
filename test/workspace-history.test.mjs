@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS, MEMORY_SETTLE_MS } from '../workspace-history.mjs';
+import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS } from '../workspace-history.mjs';
 
 const DAY = 86400_000, START = 1_800_000_000_000;
 
@@ -238,11 +238,11 @@ test('a condition with no recovery yet is active, and repeated warnings while it
   assert.deepEqual(episodes.map((e) => e.key), ['memory', 'internet']);
 });
 
-test('restarts, OOM kills, link drops, zombie processes and pump failures are one-offs, never active', async () => {
+test('restarts, OOM kills, zombie processes and pump failures are one-offs, never active', async () => {
   const record = createWorkspaceHistory(), s = richSnapshot(START), w = s.diagnostics.agentWorkflow;
   await record(s);
   s.generatedAt += MIN;
-  s.services[0].startedAt = 200; s.diagnostics.oomKills = 1; s.internet.disconnections = 3; w.pumpState = 'failed';
+  s.services[0].startedAt = 200; s.diagnostics.oomKills = 1; w.pumpState = 'failed';
   w.processes = [{ id: '9:1', pid: 9, name: 'bun', state: 'S' }];
   await record(s);
   s.generatedAt += MIN;
@@ -250,7 +250,7 @@ test('restarts, OOM kills, link drops, zombie processes and pump failures are on
   await record(s);
   s.generatedAt += MIN;
   const { episodes } = await record(s);
-  assert.deepEqual(episodes.map((e) => e.title).sort(), ['Agent pipeline pump failed', 'Linux killed a process because memory ran out', 'Network link dropped 2 time(s) between readings', 'T3 Code restarted', 'Workflow process stopped or zombie: bun (#9)']);
+  assert.deepEqual(episodes.map((e) => e.title).sort(), ['Agent pipeline pump failed', 'Linux killed a process because memory ran out', 'T3 Code restarted', 'Workflow process stopped or zombie: bun (#9)']);
   for (const episode of episodes) {
     assert.equal(episode.state, 'once', episode.title);
     assert.equal(episode.endedAt, episode.startedAt, episode.title);
@@ -490,4 +490,194 @@ test('two hours of memory flapping and transient zombies, as seen live on 2026-1
   assert.ok(!result.events.some((e) => e.id.includes(':agent-process:')));
   assert.ok(result.events.length < 10, `${result.events.length} events`);
   assert.ok(result.events.some((e) => e.title === 'Computer monitoring started'));
+});
+
+// ---------- Link drop bursts ----------
+const linkEvents = (result) => result.events.filter((e) => e.id.includes(':link:')).map((e) => [e.title, e.level, e.timestamp]).reverse();
+const UNSTABLE = (n) => `Network link unstable: dropped ${n} time(s)`, STEADY = (n) => `Network link steady again after ${n} drop${n === 1 ? '' : 's'}`;
+
+// Records one reading per [offset, counter], offsets relative to START; a null counter is an unreadable reading.
+async function linkReadings(record, s, steps) {
+  let result;
+  for (const [offset, counter] of steps) {
+    s.generatedAt = START + offset;
+    s.internet.disconnections = counter;
+    result = await record(s);
+  }
+  return result;
+}
+
+// Readings every 30 seconds from `from` to `to` inclusive, all with the same counter.
+const quiet = (from, to, counter) => {
+  const steps = [];
+  for (let t = from; t <= to; t += 30 * SEC) steps.push([t, counter]);
+  return steps;
+};
+
+test('a burst of link drops over several readings records one warning and stays one active episode', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  // +1, +2, +1, each 30 seconds to 2 minutes apart, with quiet readings between.
+  const result = await linkReadings(record, s, [[0, 10], [30 * SEC, 11], [MIN, 11], [2 * MIN, 13], [3 * MIN, 13], [4 * MIN, 14], [4 * MIN + 30 * SEC, 14]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + 30 * SEC]]);
+  assert.deepEqual(byKey(result.episodes, 'link').map((e) => [e.state, e.startedAt, e.endedAt, e.eventCount, e.title]), [['active', START + 30 * SEC, null, 1, UNSTABLE(1)]]);
+});
+
+test('a link incident recovers after the settle time without drops, dated to the first reading after the last drop, with the total count', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  const lastDrop = 4 * MIN;
+  let result = await linkReadings(record, s, [[0, 10], [30 * SEC, 11], [2 * MIN, 13], [lastDrop, 14], ...quiet(lastDrop + 30 * SEC, lastDrop + LINK_SETTLE_MS - 30 * SEC, 14)]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + 30 * SEC]]);
+  // The reading that completes the settle time records the recovery exactly once.
+  result = await linkReadings(record, s, [[lastDrop + LINK_SETTLE_MS, 14], [lastDrop + LINK_SETTLE_MS + 30 * SEC, 14], [lastDrop + LINK_SETTLE_MS + 5 * MIN, 14]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + 30 * SEC], [STEADY(4), 'info', START + lastDrop + 30 * SEC]]);
+  const [episode] = byKey(result.episodes, 'link');
+  assert.deepEqual([episode.state, episode.startedAt, episode.endedAt, episode.eventCount, episode.level], ['recovered', START + 30 * SEC, START + lastDrop + 30 * SEC, 2, 'warning']);
+  // A later drop opens a new incident.
+  result = await linkReadings(record, s, [[lastDrop + LINK_SETTLE_MS + 10 * MIN, 15]]);
+  assert.deepEqual(byKey(result.episodes, 'link').map((e) => e.state), ['active', 'recovered']);
+});
+
+test('a drop during the settle time continues the same link incident and restarts the settle time', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  const second = MIN + LINK_SETTLE_MS - 30 * SEC;
+  let result = await linkReadings(record, s, [[0, 5], [MIN, 6], ...quiet(MIN + 30 * SEC, second - 30 * SEC, 6), [second, 8], ...quiet(second + 30 * SEC, second + LINK_SETTLE_MS - 30 * SEC, 8)]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN]]);
+  result = await linkReadings(record, s, [[second + LINK_SETTLE_MS, 8]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN], [STEADY(3), 'info', START + second + 30 * SEC]]);
+  assert.deepEqual(byKey(result.episodes, 'link').map((e) => [e.state, e.startedAt, e.endedAt]), [['recovered', START + MIN, START + second + 30 * SEC]]);
+});
+
+test('unreadable link counters neither end nor reopen the incident, and a falling counter records no drop', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  // Unreadable through the whole settle time: the incident stays open.
+  let result = await linkReadings(record, s, [[0, 10], [MIN, 11], [MIN + 30 * SEC, null], [10 * MIN, null], [20 * MIN, null], [30 * MIN, null]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN]]);
+  assert.deepEqual(byKey(result.episodes, 'link').map((e) => e.state), ['active']);
+  // Back with drops that happened during the gap: they join the open incident.
+  result = await linkReadings(record, s, [[31 * MIN, 13]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN]]);
+  // The settle time starts at the first readable reading after the last drop; unreadable ones inside it change nothing.
+  result = await linkReadings(record, s, [[32 * MIN, 13], [33 * MIN, null], [40 * MIN, null], [31 * MIN + LINK_SETTLE_MS, null], [31 * MIN + LINK_SETTLE_MS + 30 * SEC, 13]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN], [STEADY(3), 'info', START + 32 * MIN]]);
+  // Drops that show up after a long unreadable stretch, even one that began with a quiet reading, continue the incident.
+  result = await linkReadings(record, s, [[50 * MIN, 14], [50 * MIN + 30 * SEC, 14], [51 * MIN, null], [70 * MIN, null], [71 * MIN, 24]]);
+  assert.deepEqual(linkEvents(result).slice(2), [[UNSTABLE(1), 'warning', START + 50 * MIN]]);
+  result = await linkReadings(record, s, [[71 * MIN + 30 * SEC, 24], [71 * MIN + LINK_SETTLE_MS, 24]]);
+  assert.deepEqual(linkEvents(result).slice(2), [[UNSTABLE(1), 'warning', START + 50 * MIN], [STEADY(11), 'info', START + 71 * MIN + 30 * SEC]]);
+  // A reset counter (reboot, interface reset) re-baselines without a drop; the next rise counts from the new value.
+  result = await linkReadings(record, s, [[100 * MIN, 2], [101 * MIN, null], [102 * MIN, 0], [103 * MIN, 0]]);
+  assert.equal(linkEvents(result).length, 4);
+  result = await linkReadings(record, s, [[104 * MIN, 1]]);
+  assert.deepEqual(linkEvents(result).at(-1), [UNSTABLE(1), 'warning', START + 104 * MIN]);
+  // A reset during an open incident cannot confirm the quiet time before it: the settle time starts again from the reset.
+  result = await linkReadings(record, s, [[105 * MIN, 1], [104 * MIN + LINK_SETTLE_MS, 0]]);
+  assert.equal(linkEvents(result).length, 5);
+  result = await linkReadings(record, s, [[104 * MIN + LINK_SETTLE_MS + 30 * SEC, 0], [104 * MIN + 2 * LINK_SETTLE_MS - 30 * SEC, 0]]);
+  assert.equal(linkEvents(result).length, 5);
+  result = await linkReadings(record, s, [[104 * MIN + 2 * LINK_SETTLE_MS, 0]]);
+  assert.deepEqual(linkEvents(result).at(-1), [STEADY(1), 'info', START + 104 * MIN + LINK_SETTLE_MS + 30 * SEC]);
+});
+
+test('a network change records no link drops and does not reopen a link incident', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  await linkReadings(record, s, [[0, 10]]);
+  s.internet.networkName = 'Other';
+  const result = await linkReadings(record, s, [[MIN, 0], [2 * MIN, 0]]);
+  assert.deepEqual(linkEvents(result), []);
+  assert.ok(result.events.some((e) => e.title === 'Network connected or changed'));
+});
+
+test('a network change during an open link incident restarts its settle time instead of confirming it', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  await linkReadings(record, s, [[0, 10], [MIN, 11], [2 * MIN, 11]]);
+  s.internet.networkName = 'Other';
+  let result = await linkReadings(record, s, [[MIN + LINK_SETTLE_MS, 3]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN]]);
+  result = await linkReadings(record, s, [[MIN + LINK_SETTLE_MS + 30 * SEC, 3], [MIN + 2 * LINK_SETTLE_MS, 3]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(1), 'warning', START + MIN], [STEADY(1), 'info', START + MIN + LINK_SETTLE_MS + 30 * SEC]]);
+});
+
+test('an unreadable counter on a new network does not carry the old network\'s counter as its baseline', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  await linkReadings(record, s, [[0, 5]]);
+  s.internet.networkName = 'Other';
+  const result = await linkReadings(record, s, [[MIN, null], [2 * MIN, 100], [3 * MIN, 100]]);
+  assert.deepEqual(linkEvents(result), []);
+});
+
+test('the open link incident, its drop count and settle time survive a restart of the recorder', async (t) => {
+  const file = await tempFile(t), s = snapshot(START);
+  await linkReadings(createWorkspaceHistory({ file }), s, [[0, 10], [MIN, 12], [2 * MIN, 13], [3 * MIN, 13]]);
+  const stored = JSON.parse(await readFile(file, 'utf8'));
+  assert.deepEqual(stored.previous.link, { drops: 3, lastDropAt: START + 2 * MIN, steadySince: START + 3 * MIN });
+  // A new recorder continues the incident: another drop joins it instead of opening a second one.
+  let result = await linkReadings(createWorkspaceHistory({ file }), s, [[4 * MIN, 14], [5 * MIN, 14]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(2), 'warning', START + MIN]]);
+  // And another one finishes it with the total from before both restarts.
+  result = await linkReadings(createWorkspaceHistory({ file }), s, [[4 * MIN + LINK_SETTLE_MS, 14]]);
+  assert.deepEqual(linkEvents(result), [[UNSTABLE(2), 'warning', START + MIN], [STEADY(4), 'info', START + 5 * MIN]]);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).previous.link, null);
+});
+
+test('a history file from the previous build, without link incident state, starts with no open incident', async (t) => {
+  const file = await tempFile(t), now = START;
+  const legacy = ev(now - 2 * MIN, 'link', 'Network link dropped 2 time(s) between readings', 'warning');
+  const previous = { uptimeSec: 900, internet: 'online', network: 'Wi-Fi', disconnections: 5, memory: 'healthy', oomKills: 0,
+    services: { 't3code.service': { state: 'running', startedAt: 100, restarts: 0 } }, health: {}, disks: {}, backup: 'unknown', backupFinished: null };
+  await writeFile(file, JSON.stringify({ version: 1, events: [legacy], samples: [], previous, lastSuccessAt: null, startedAt: now - DAY }));
+  const s = snapshot(now);
+  const record = createWorkspaceHistory({ file });
+  let result = await linkReadings(record, s, [[0, 5], [LINK_SETTLE_MS, 5]]);
+  assert.deepEqual(linkEvents(result), [['Network link dropped 2 time(s) between readings', 'warning', now - 2 * MIN]]);
+  result = await linkReadings(record, s, [[LINK_SETTLE_MS + MIN, 6]]);
+  assert.deepEqual(linkEvents(result).at(-1), [UNSTABLE(1), 'warning', now + LINK_SETTLE_MS + MIN]);
+  // The legacy per-reading event stays a one-off next to the new active incident.
+  assert.deepEqual(byKey(result.episodes, 'link').map((e) => [e.title, e.state]), [[UNSTABLE(1), 'active'], ['Network link dropped 2 time(s) between readings', 'once']]);
+});
+
+test('legacy per-reading link drop events stay one-offs', () => {
+  const episodes = incidentEpisodes([
+    ev(START + 2 * MIN, 'link', 'Network link dropped 3 time(s) between readings', 'warning'),
+    ev(START + MIN, 'link', 'Network link dropped 1 time(s) between readings', 'warning'),
+  ], START + 3 * MIN);
+  assert.deepEqual(episodes.map((e) => [e.title, e.state, e.eventCount, e.startedAt, e.endedAt]), [
+    ['Network link dropped 3 time(s) between readings', 'once', 1, START + 2 * MIN, START + 2 * MIN],
+    ['Network link dropped 1 time(s) between readings', 'once', 1, START + MIN, START + MIN],
+  ]);
+});
+
+test('a day of Wi-Fi drop bursts, as seen live on 2026-11-17/18, records about two events per burst instead of one per reading', async () => {
+  const record = createWorkspaceHistory(), s = snapshot(START);
+  // Deterministic pseudo-random bursts: 2–12 drop readings 30–120 seconds apart, then 1–4 quiet hours.
+  let seed = 18;
+  const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  let counter = 100, t = 0, dropReadings = 0, result;
+  const steps = [[t, counter]];
+  const BURSTS = 11;
+  for (let burst = 0; burst < BURSTS; burst++) {
+    t += 60 * MIN + Math.floor(random() * 7) * 30 * MIN;
+    const drops = 2 + Math.floor(random() * 11);
+    for (let i = 0; i < drops; i++) {
+      counter += 1 + Math.floor(random() * 3);
+      steps.push([t, counter]);
+      dropReadings++;
+      // Quiet readings every 30 seconds until the next drop, 30–120 seconds later.
+      const gap = 30 * SEC * (1 + Math.floor(random() * 4));
+      for (let q = t + 30 * SEC; q < t + gap; q += 30 * SEC) steps.push([q, counter]);
+      t += gap;
+    }
+    // Quiet readings every 30 seconds until the next burst.
+    for (let q = t; q < t + 60 * MIN; q += 30 * SEC) steps.push([q, counter]);
+  }
+  steps.push(...quiet(t + 60 * MIN, t + 60 * MIN + LINK_SETTLE_MS, counter));
+  result = await linkReadings(record, s, steps);
+  const link = linkEvents(result);
+  assert.ok(dropReadings > 50, `${dropReadings} drop readings`);
+  // One event per drop reading before; one warning and one recovery per burst now.
+  assert.equal(link.length, 2 * BURSTS);
+  assert.equal(link.filter(([, level]) => level === 'warning').length, BURSTS);
+  const episodes = byKey(result.episodes, 'link');
+  assert.equal(episodes.length, BURSTS);
+  assert.ok(episodes.every((e) => e.state === 'recovered' && e.eventCount === 2));
+  assert.equal(link.filter(([, level]) => level === 'info').reduce((sum, [title]) => sum + Number(/after (\d+) drop/.exec(title)[1]), 0), counter - 100);
 });
