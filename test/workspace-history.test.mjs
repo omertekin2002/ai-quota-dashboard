@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS } from '../workspace-history.mjs';
+import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS, MAX_EPISODE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS } from '../workspace-history.mjs';
 
 const DAY = 86400_000, START = 1_800_000_000_000;
 
@@ -303,6 +303,101 @@ test('a restart or monitoring gap inside an episode adds a caveat, and a pruned 
   assert.deepEqual(byKey(episodes, 'network'), []);
   // A recovery that is not the oldest event for its key, with nothing open, is ignored.
   assert.deepEqual(incidentEpisodes([ev(START + 2 * MIN, 'memory', 'Memory pressure recovered'), ev(START + MIN, 'memory', 'Memory pressure recovered')], now).map((e) => e.endedAt), [START + MIN]);
+});
+
+// ---------- Episode evidence ----------
+const nonGap = (episode) => episode.events.filter((e) => !e.gap).length + (episode.omittedEvents ?? 0);
+
+test('each episode lists the events that opened, extended and ended it, oldest first, and nothing else', () => {
+  const now = START + 60 * MIN;
+  const events = [
+    ev(START + 40 * MIN, 'memory', 'Memory pressure recovered'),
+    ev(START + 30 * MIN, 'internet', 'Internet connection restored'),
+    ev(START + 20 * MIN, 'memory', 'Memory pressure elevated or available RAM low', 'critical'),
+    ev(START + 10 * MIN, 'internet', 'Internet became offline', 'warning'),
+    ev(START + 5 * MIN, 'memory', 'Memory pressure elevated or available RAM low', 'warning'),
+    ev(START + 4 * MIN, 'agent-job:job-1', 'Workflow job job-1: failed', 'warning'),
+    ev(START + 3 * MIN, 'oom', 'Linux killed a process because memory ran out', 'critical'),
+    ev(START + 2 * MIN, 't3code.service', 'T3 Code: running'),
+    ev(START + 50 * MIN, 'cli-health', 'Backend health: response failed', 'warning'),
+  ];
+  const episodes = incidentEpisodes(events, now);
+  const [memory] = byKey(episodes, 'memory'), [internet] = byKey(episodes, 'internet'), [oom] = byKey(episodes, 'oom');
+  const [service] = byKey(episodes, 't3code.service'), [check] = byKey(episodes, 'cli-health');
+  assert.deepEqual(memory.events, [
+    { timestamp: START + 5 * MIN, level: 'warning', title: 'Memory pressure elevated or available RAM low' },
+    { timestamp: START + 20 * MIN, level: 'critical', title: 'Memory pressure elevated or available RAM low' },
+    { timestamp: START + 40 * MIN, level: 'info', title: 'Memory pressure recovered' },
+  ]);
+  assert.deepEqual(internet.events.map((e) => e.title), ['Internet became offline', 'Internet connection restored']);
+  // A one-off's row is its only event, so it carries no list.
+  assert.equal(oom.events, undefined);
+  assert.equal(oom.eventCount, 1);
+  assert.deepEqual(service.events.map((e) => e.title), ['T3 Code: running']);
+  assert.deepEqual(check.events.map((e) => [e.title, e.level]), [['Backend health: response failed', 'warning']]);
+  for (const episode of episodes.filter((e) => e.state !== 'once')) {
+    assert.equal(episode.eventCount, nonGap(episode), episode.key);
+    assert.equal(episode.omittedEvents, undefined, episode.key);
+    // No ids or other recorder fields leak into the API.
+    for (const e of episode.events) assert.deepEqual(Object.keys(e).sort(), ['level', 'timestamp', 'title']);
+  }
+});
+
+test('an episode with a restart or monitoring caveat lists the gap events inside it, and only those', () => {
+  const now = START + 60 * MIN;
+  const episodes = incidentEpisodes([
+    ev(START + 55 * MIN, 'boot', 'Computer restarted'),
+    ev(START + 50 * MIN, 'internet', 'Internet connection restored'),
+    ev(START + 50 * MIN, 'boot', 'Computer restarted'),
+    ev(START + 40 * MIN, 'internet', 'Internet became offline', 'warning'),
+    ev(START + 30 * MIN, 'monitor', 'Computer monitoring started'),
+    ev(START + 20 * MIN, 'memory', 'Memory pressure elevated or available RAM low', 'warning'),
+    ev(START + 10 * MIN, 'boot', 'Computer restarted'),
+  ], now);
+  const [memory] = byKey(episodes, 'memory'), [internet] = byKey(episodes, 'internet');
+  // The active memory episode runs to now: the monitoring gap and both later restarts are inside, the first restart is not.
+  assert.deepEqual(memory.events.map((e) => [e.timestamp, e.title, e.gap ?? false, e.key]), [
+    [START + 20 * MIN, 'Memory pressure elevated or available RAM low', false, undefined],
+    [START + 30 * MIN, 'Computer monitoring started', true, 'monitor'],
+    [START + 50 * MIN, 'Computer restarted', true, 'boot'],
+    [START + 55 * MIN, 'Computer restarted', true, 'boot'],
+  ]);
+  assert.equal(memory.caveats.length, 2);
+  // A restart in the same reading as the recovery is inside the episode; the one after it ended is not.
+  assert.deepEqual(internet.events.map((e) => [e.timestamp, e.title, e.gap ?? false]), [
+    [START + 40 * MIN, 'Internet became offline', false],
+    [START + 50 * MIN, 'Internet connection restored', false],
+    [START + 50 * MIN, 'Computer restarted', true],
+  ]);
+  for (const episode of episodes) assert.equal(episode.eventCount, nonGap(episode));
+  // No caveat, no gap entries.
+  const plain = incidentEpisodes([ev(START + 2 * MIN, 'boot', 'Computer restarted'), ev(START + 3 * MIN, 'internet', 'Internet became offline', 'warning')], now);
+  assert.deepEqual(plain[0].caveats, []);
+  assert.ok(plain[0].events.every((e) => !e.gap));
+});
+
+test('an episode lists at most MAX_EPISODE_EVENTS entries, keeping the first, the newest and its gaps, and counts the rest', () => {
+  const now = START + 200 * MIN;
+  // 40 warnings for one HTTP check (alternating failed/unavailable), a restart in the middle, then the recovery.
+  const events = Array.from({ length: 40 }, (_, i) => ev(START + i * MIN, 'cli-health', i % 2 ? 'Backend health: check unavailable' : 'Backend health: response failed', 'warning'));
+  events.push(ev(START + 10 * MIN + 1, 'boot', 'Computer restarted'), ev(START + 100 * MIN, 'cli-health', 'Backend health: response recovered'));
+  const [episode] = incidentEpisodes(events, now);
+  assert.equal(MAX_EPISODE_EVENTS, 20);
+  assert.equal(episode.eventCount, 41);
+  assert.equal(episode.events.length, MAX_EPISODE_EVENTS);
+  assert.deepEqual(episode.events[0], { timestamp: START, level: 'warning', title: 'Backend health: response failed' });
+  assert.equal(episode.events.at(-1).title, 'Backend health: response recovered');
+  assert.ok(episode.events.some((e) => e.gap && e.key === 'boot'), 'the restart behind the caveat is kept');
+  // Then the newest warnings: the first, the gap, 17 newest warnings and the recovery.
+  assert.deepEqual(episode.events.filter((e) => !e.gap).slice(1, -1).map((e) => e.timestamp), Array.from({ length: 17 }, (_, i) => START + (23 + i) * MIN));
+  assert.equal(episode.omittedEvents, 41 - 19);
+  assert.equal(episode.eventCount, nonGap(episode));
+  // Still oldest first.
+  assert.deepEqual(episode.events.map((e) => e.timestamp), episode.events.map((e) => e.timestamp).sort((a, b) => a - b));
+  // At the cap exactly, nothing is dropped.
+  const [full] = incidentEpisodes(events.slice(0, MAX_EPISODE_EVENTS), now);
+  assert.equal(full.events.length, MAX_EPISODE_EVENTS);
+  assert.equal(full.omittedEvents, undefined);
 });
 
 test('job events, pause/resume and routine markers produce no episodes', () => {
