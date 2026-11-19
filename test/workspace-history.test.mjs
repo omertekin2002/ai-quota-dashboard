@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS, MAX_EPISODE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS } from '../workspace-history.mjs';
+import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS, MAX_EPISODE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS, MONITOR_GAP_MS } from '../workspace-history.mjs';
 
 const DAY = 86400_000, START = 1_800_000_000_000;
 
@@ -441,6 +441,58 @@ test('a history file from the previous build loads unchanged and gains episodes 
   const stored = JSON.parse(await readFile(file, 'utf8'));
   assert.deepEqual(Object.keys(stored).sort(), ['events', 'lastSuccessAt', 'previous', 'samples', 'startedAt', 'version']);
   assert.deepEqual(stored.events, events);
+});
+
+const monitorEvents = (result) => result.events.filter((e) => /^\d+:(monitor|boot):/.test(e.id)).map((e) => [e.title, e.timestamp]).reverse();
+
+test('a dashboard restart after a gap in readings records a monitor marker, so an incident spanning it gets its caveat', async (t) => {
+  const file = await tempFile(t), s = snapshot(START);
+  const first = createWorkspaceHistory({ file });
+  await first(s);
+  s.generatedAt = START + MIN;
+  s.internet.state = 'offline';
+  await first(s);
+  // The dashboard is stopped for an hour while the internet is down, then resumes from its saved history.
+  s.generatedAt = START + 61 * MIN;
+  s.internet.state = 'online';
+  let result = await createWorkspaceHistory({ file })(s);
+  const RESUMED = 'Computer monitoring resumed after 60 minutes without readings';
+  assert.deepEqual(monitorEvents(result), [['Computer monitoring started', START], [RESUMED, START + 61 * MIN]]);
+  const [internet] = byKey(result.episodes, 'internet');
+  assert.deepEqual([internet.state, internet.startedAt, internet.endedAt], ['recovered', START + MIN, START + 61 * MIN]);
+  assert.deepEqual(internet.caveats.map((c) => c.split(';')[0]), ['Monitoring restarted during this incident']);
+  assert.deepEqual(internet.events.map((e) => [e.title, e.gap ?? false]), [['Internet became offline', false], ['Internet connection restored', false], [RESUMED, true]]);
+  // A quick restart, such as an auto-update, records nothing.
+  s.generatedAt = START + 61 * MIN + MONITOR_GAP_MS - 1;
+  result = await createWorkspaceHistory({ file })(s);
+  assert.equal(monitorEvents(result).length, 2);
+  // A computer restart is recorded once, by its own marker.
+  s.generatedAt = START + 90 * MIN;
+  s.uptimeSec = 60;
+  const afterBoot = createWorkspaceHistory({ file });
+  result = await afterBoot(s);
+  assert.deepEqual(monitorEvents(result).slice(2), [['Computer restarted', START + 90 * MIN]]);
+  // Only a restart counts: a slow reading in a running dashboard is not a monitoring restart.
+  s.generatedAt = START + 100 * MIN;
+  s.uptimeSec = 660;
+  result = await afterBoot(s);
+  assert.equal(monitorEvents(result).length, 3);
+  // Longer gaps are given in hours.
+  s.generatedAt = START + 280 * MIN;
+  s.uptimeSec = 11_460;
+  result = await createWorkspaceHistory({ file })(s);
+  assert.deepEqual(monitorEvents(result).at(-1), ['Computer monitoring resumed after 3 hours without readings', START + 280 * MIN]);
+});
+
+test('a history file from the previous build, without a reading time, measures the gap from its newest sample', async (t) => {
+  const file = await tempFile(t), now = START;
+  const previous = { uptimeSec: 900, internet: 'online', network: 'Wi-Fi', disconnections: 1, memory: 'healthy', oomKills: 0,
+    services: { 't3code.service': { state: 'running', startedAt: 100, restarts: 0 } }, health: {}, disks: {}, backup: 'unknown', backupFinished: null };
+  const samples = [{ timestamp: now - 11 * MIN, state: 'online', latencyMs: 40 }, { timestamp: now - 10 * MIN, state: 'online', latencyMs: 50 }];
+  await writeFile(file, JSON.stringify({ version: 1, events: [], samples, previous, lastSuccessAt: null, startedAt: now - DAY }));
+  const result = await createWorkspaceHistory({ file })(snapshot(now));
+  assert.deepEqual(monitorEvents(result), [['Computer monitoring resumed after 10 minutes without readings', now]]);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).previous.readAt, now);
 });
 
 // ---------- Memory settle time ----------

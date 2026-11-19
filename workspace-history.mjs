@@ -22,6 +22,10 @@ export const LINK_SETTLE_MS = 15 * 60_000;
 // The most entries an episode's `events` list carries, so /api/workspace has a hard bound per episode.
 export const MAX_EPISODE_EVENTS = 20;
 
+// A dashboard restart that left at least this long without readings records a `monitor` marker, so an incident
+// spanning it gets its caveat. Quicker restarts, such as an auto-update, miss a reading or two and record nothing.
+export const MONITOR_GAP_MS = 2 * 60_000;
+
 const STOPPED_STATES = ['Z', 'T', 't'];
 const isPressure = (level) => level === 'warning' || level === 'critical';
 // Older builds recorded each rise of the link-drop counter as its own event.
@@ -109,6 +113,8 @@ function capEpisodeEvents(events) {
  *   successes with nothing to end, and the `boot`/`monitor` markers.
  * - A `boot` or `monitor` event after an episode starts and no later than its end adds a caveat: the
  *   recovery may only have been seen after the computer or monitoring came back. No cause is implied.
+ *   The recorder writes `monitor` when monitoring first starts, and when the dashboard restarts with its
+ *   saved history after at least MONITOR_GAP_MS (2 minutes) without readings.
  * - A recovery that is the oldest retained event for its key ends an episode whose start was pruned:
  *   it is 'recovered' with startedAt null. `Network connected or changed` is skipped there, because it
  *   also records a switch between two networks.
@@ -171,7 +177,7 @@ export function incidentEpisodes(events, now) {
 }
 
 export function createWorkspaceHistory({ file = null } = {}) {
-  let loaded = false, events = [], samples = [], previous = null, lastSuccessAt = null, startedAt = null;
+  let loaded = false, resumed = false, events = [], samples = [], previous = null, lastSuccessAt = null, startedAt = null;
   return async function record(snapshot) {
     if (!loaded) {
       loaded = true;
@@ -182,6 +188,7 @@ export function createWorkspaceHistory({ file = null } = {}) {
             events = Array.isArray(stored.events) ? stored.events : [];
             samples = Array.isArray(stored.samples) ? stored.samples : [];
             previous = stored.previous || null;
+            resumed = previous != null;
             lastSuccessAt = stored.lastSuccessAt || null;
             startedAt = stored.startedAt || null;
           }
@@ -196,7 +203,7 @@ export function createWorkspaceHistory({ file = null } = {}) {
     }
     const diagnostics = snapshot.diagnostics;
     const current = {
-      uptimeSec: snapshot.uptimeSec, internet: snapshot.internet.state, network: snapshot.internet.networkName,
+      readAt: now, uptimeSec: snapshot.uptimeSec, internet: snapshot.internet.state, network: snapshot.internet.networkName,
       // An unreadable counter keeps the last known value, so drops during the gap are counted once it is back.
       // The counter belongs to one network device, so a network change drops the old baseline.
       disconnections: snapshot.internet.disconnections ?? (previous?.network === snapshot.internet.networkName ? previous?.disconnections : null) ?? null, memory: memoryLevel(snapshot), oomKills: diagnostics.oomKills,
@@ -262,7 +269,16 @@ export function createWorkspaceHistory({ file = null } = {}) {
     }
     if (!previous) add('monitor', 'Computer monitoring started');
     else {
-      if (current.uptimeSec < previous.uptimeSec) add('boot', 'Computer restarted');
+      const rebooted = current.uptimeSec < previous.uptimeSec;
+      if (rebooted) add('boot', 'Computer restarted');
+      // The first reading after the dashboard restarted with saved history. Files from older builds have no
+      // reading time, so their newest latency sample (taken with that reading) stands in; with neither, the gap
+      // is unknown and nothing is recorded. A computer restart already has its own marker.
+      const lastReadAt = resumed ? previous.readAt ?? samples.at(-1)?.timestamp : null;
+      if (!rebooted && Number.isFinite(lastReadAt) && now - lastReadAt >= MONITOR_GAP_MS) {
+        const minutes = Math.round((now - lastReadAt) / 60_000);
+        add('monitor', `Computer monitoring resumed after ${minutes < 90 ? `${minutes} minutes` : `${Math.round(minutes / 60)} hours`} without readings`);
+      }
       if (current.internet !== previous.internet) add('internet', `Internet ${current.internet === 'online' ? 'connection restored' : `became ${current.internet}`}`, current.internet === 'online' ? 'info' : 'warning');
       if (current.network !== previous.network) add('network', current.network ? 'Network connected or changed' : 'Network disconnected', current.network ? 'info' : 'warning');
       // Link drops are one incident per burst. `link` is the open incident: its drop count, the reading that saw
@@ -348,6 +364,7 @@ export function createWorkspaceHistory({ file = null } = {}) {
     samples = samples.filter((s) => s.timestamp >= now - 30 * 60_000 && s.timestamp <= now).slice(-80);
     events = pruneEvents(events, now);
     previous = current;
+    resumed = false;
     let persisted = null;
     if (file) {
       try {
