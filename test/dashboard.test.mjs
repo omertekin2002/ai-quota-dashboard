@@ -24,7 +24,7 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
       elements.set(id, {
         innerHTML: '', textContent: '', hidden: hidden(id), style: {}, attributes: {}, setAttribute(name, value) { this.attributes[name] = String(value); },
         getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 0, width: 200, height: 100 }),
-        querySelectorAll(selector) { return selector === '.win' ? winElements(this.innerHTML) : []; },
+        querySelectorAll(selector) { return selector === '.win' ? winElements(this.innerHTML) : selector === '.incident-toggle' ? incidentElements(this.innerHTML) : []; },
       });
     }
     return elements.get(id);
@@ -36,6 +36,18 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
       const el = {
         tag, getAttribute: attr, dataset: { a: attr('data-a'), w: attr('data-w'), key: attr('data-key') },
         closest: (selector) => (selector === '.win' ? el : null), matches: (selector) => selector === '.win',
+        focus: () => { document.activeElement = el; },
+      };
+      return el;
+    });
+  }
+  // Stub `.incident-toggle` elements for the incident rows rendered in `html`.
+  function incidentElements(html) {
+    return [...html.matchAll(/<div class="event-title incident-toggle"[^>]*>/g)].map(([tag]) => {
+      const attr = (name) => { const m = tag.match(new RegExp(` ${name}="([^"]*)"`)); return m && unescapeHtml(m[1]); };
+      const el = {
+        tag, getAttribute: attr, dataset: { incident: attr('data-incident') },
+        closest: (selector) => (selector === '.incident-toggle' ? el : null), matches: (selector) => selector === '.incident-toggle',
         focus: () => { document.activeElement = el; },
       };
       return el;
@@ -97,7 +109,9 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   const click = (el) => dispatch('click', { target: el });
   const press = (el, key, fields = {}) => dispatch('keydown', { target: el, key, ...fields });
   const fire = (type) => { for (const fn of windowListeners[type] || []) fn({ type }); };
-  return { context, document, element, media, listeners, location, fire, timeouts, timers, intervals, tick: () => intervals.find((i) => i.ms === 15_000).fn(), signals, expire, dispatch, winEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
+  // The rendered incident row whose episode has this key, as a stub element.
+  const incidentEl = (key) => incidentElements(element('workspace-diagnostics').innerHTML).find((el) => JSON.parse(el.dataset.incident)[0] === key);
+  return { context, document, element, media, listeners, location, fire, timeouts, timers, intervals, tick: () => intervals.find((i) => i.ms === 15_000).fn(), signals, expire, dispatch, winEl, incidentEl, hover, click, press, run: (code) => vm.runInContext(code, context) };
 }
 
 const unescapeHtml = (s) => s.replace(/&(quot|#39|lt|gt|amp);/g, (_, e) => ({ quot: '"', '#39': "'", lt: '<', gt: '>', amp: '&' })[e]);
@@ -982,6 +996,142 @@ test('a live window past its reset reloads after 20 s, but not again while loads
   await run('load()');
   assert.equal(quotaRequests, 3);
   assert.equal(reloads().length, 2, 'a successful load schedules it again');
+});
+
+test('the Incidents card shows active, recovered and one-off episodes in text, escapes titles, and has an empty state', async () => {
+  const now = Date.UTC(2026, 10, 17, 12, 0), MIN = 60_000;
+  const fixture = {
+    generatedAt: now, supported: true, model: 'HP laptop', uptimeSec: 10000, power: { acOnline: true, batteries: [] }, temperatures: [],
+    memory: { usedPct: 50, usedBytes: 1024 ** 3, totalBytes: 2 * 1024 ** 3 }, internet: { state: 'online', latencyMs: 50 }, services: [],
+    diagnostics: { memoryLevel: 'healthy', pressure: { cpu: null, memory: null, io: null }, topProcesses: [], disks: [],
+      backup: { state: 'success', lastSuccessAt: now - MIN, scheduleActive: true }, tailscale: { state: 'running', connections: [] }, healthChecks: [] },
+    history: { events: [], samples: [], persisted: true, episodes: [
+      { key: 'memory', title: 'Memory pressure elevated or available RAM low', level: 'critical', startedAt: now - 95 * MIN, endedAt: null, state: 'active', eventCount: 2,
+        caveats: ['Computer restarted during this incident; the recovery may only have been seen once it was back'] },
+      { key: 't3-local', title: '<script>alert(1)</script> · HTTP check: response failed', level: 'warning', startedAt: now - 200 * MIN, endedAt: now - 170 * MIN, state: 'recovered', eventCount: 2, caveats: [] },
+      { key: 'oom', title: 'Linux killed a process because memory ran out', level: 'critical', startedAt: now - 300 * MIN, endedAt: now - 300 * MIN, state: 'once', eventCount: 1, caveats: [] },
+      { key: 'internet', title: 'Internet connection restored', level: 'info', startedAt: null, endedAt: now - 400 * MIN, state: 'recovered', eventCount: 1, caveats: ['Start not retained; it is older than the kept history'] },
+    ] },
+  };
+  const page = await loadDashboard({ now, workspace: fixture, hidden: (id) => id === 'workspace-diagnostics' });
+  const html = page.element('workspace-diagnostics').innerHTML;
+  const card = html.slice(html.indexOf('<h3>Incidents</h3>'), html.indexOf('<h3>Recent events</h3>'));
+  assert.ok(card.length > 0, 'Incidents comes before Recent events');
+  const text = unescapeHtml(card.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ');
+  for (const label of ['Active: Memory pressure elevated or available RAM low', '1h 35m so far', '2 changes recorded', 'Computer restarted during this incident',
+    'Recovered: <script>alert(1)</script> · HTTP check: response failed', 'lasted 30m', 'Observed once: Linux killed a process', 'Observed once at',
+    'Recovered: Internet connection restored', 'Recovered at', 'Start not retained', 'sampled every 30 seconds, so durations are approximate']) assert.ok(text.includes(label), label);
+  assert.ok(text.indexOf('Active: Memory') < text.indexOf('Recovered: <script>'));
+  assert.ok(!card.includes('<script>'));
+  assert.ok(card.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+  assert.ok(card.includes(`datetime="${new Date(now - 95 * MIN).toISOString()}"`));
+  page.run('workspace.history.episodes = []; renderWorkspace();');
+  assert.ok(page.element('workspace-diagnostics').innerHTML.includes('No incidents in the last seven days'));
+  page.run('workspace.history.episodes = Array.from({ length: 12 }, (_, i) => ({ key: "link", title: "Link drop " + i, level: "warning", startedAt: ' + now + ' - i * 60000, endedAt: ' + now + ' - i * 60000, state: "once", eventCount: 1, caveats: [] })); renderWorkspace();');
+  const many = page.element('workspace-diagnostics').innerHTML;
+  assert.ok(many.includes('Showing 10 of 12 incidents.'));
+  assert.ok(!many.includes('Link drop 10'));
+  // A server from before episodes existed: no Incidents card, Recent events still there.
+  page.run('delete workspace.history.episodes; renderWorkspace();');
+  assert.ok(!page.element('workspace-diagnostics').innerHTML.includes('<h3>Incidents</h3>'));
+  assert.ok(page.element('workspace-diagnostics').innerHTML.includes('<h3>Recent events</h3>'));
+});
+
+test('an incident opens to its recorded events by click, Enter or Space, closes by Escape, and stays open across a refresh', async () => {
+  const now = Date.UTC(2026, 10, 17, 12, 0), MIN = 60_000;
+  const memoryEvents = [
+    { timestamp: now - 95 * MIN, level: 'warning', title: 'Memory pressure elevated or available RAM low' },
+    { timestamp: now - 80 * MIN, level: 'info', title: 'Computer restarted', gap: true, key: 'boot' },
+    { timestamp: now - 60 * MIN, level: 'critical', title: 'Memory pressure elevated or available RAM low' },
+  ];
+  const fixture = {
+    generatedAt: now, supported: true, model: 'HP laptop', uptimeSec: 10000, power: { acOnline: true, batteries: [] }, temperatures: [],
+    memory: { usedPct: 50, usedBytes: 1024 ** 3, totalBytes: 2 * 1024 ** 3 }, internet: { state: 'online', latencyMs: 50 }, services: [],
+    diagnostics: { memoryLevel: 'healthy', pressure: { cpu: null, memory: null, io: null }, topProcesses: [], disks: [],
+      backup: { state: 'success', lastSuccessAt: now - MIN, scheduleActive: true }, tailscale: { state: 'running', connections: [] }, healthChecks: [] },
+    history: { events: [], samples: [], persisted: true, episodes: [
+      { key: 'memory', title: 'Memory pressure elevated or available RAM low', level: 'critical', startedAt: now - 95 * MIN, endedAt: null, state: 'active', eventCount: 2,
+        caveats: ['Computer restarted during this incident; the recovery may only have been seen once it was back'], events: memoryEvents },
+      { key: 't3-local', title: '<img src=x> · HTTP check: response failed', level: 'warning', startedAt: now - 200 * MIN, endedAt: now - 170 * MIN, state: 'recovered', eventCount: 25, caveats: [], omittedEvents: 5,
+        events: [{ timestamp: now - 200 * MIN, level: 'warning', title: '<img src=x> · HTTP check: response failed' }, ...Array.from({ length: 18 }, (_, i) => ({ timestamp: now - (190 - i) * MIN, level: 'warning', title: '<b>check unavailable</b>' })),
+          { timestamp: now - 170 * MIN, level: 'info', title: '<img src=x> · HTTP check: response recovered' }] },
+      { key: 'oom', title: 'Linux killed a process because memory ran out', level: 'critical', startedAt: now - 300 * MIN, endedAt: now - 300 * MIN, state: 'once', eventCount: 1, caveats: [] },
+      // A recovery whose start was pruned: one event, so no disclosure.
+      { key: 'cli-health', title: 'Backend health: response recovered', level: 'info', startedAt: null, endedAt: now - 350 * MIN, state: 'recovered', eventCount: 1,
+        caveats: ['Start not retained; it is older than the kept history'], events: [{ timestamp: now - 350 * MIN, level: 'info', title: 'Backend health: response recovered' }] },
+      // From an older server: no events field.
+      { key: 'internet', title: 'Internet became offline', level: 'warning', startedAt: now - 400 * MIN, endedAt: now - 390 * MIN, state: 'recovered', eventCount: 2, caveats: [] },
+    ] },
+  };
+  const page = await loadDashboard({ now, workspace: fixture, hidden: (id) => id === 'workspace-diagnostics' });
+  const { click, press, incidentEl, element, document } = page;
+  const card = () => { const html = element('workspace-diagnostics').innerHTML; return html.slice(html.indexOf('<h3>Incidents</h3>'), html.indexOf('<h3>Recent events</h3>')); };
+  const text = () => unescapeHtml(card().replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ');
+  const memory = () => incidentEl('memory');
+
+  // Collapsed by default; one-offs and episodes without events get no disclosure.
+  assert.equal(memory().getAttribute('aria-expanded'), 'false');
+  assert.equal(incidentEl('t3-local').getAttribute('aria-expanded'), 'false');
+  assert.equal(incidentEl('oom'), undefined);
+  assert.equal(incidentEl('internet'), undefined);
+  assert.equal(incidentEl('cli-health'), undefined);
+  assert.ok(text().includes('Observed once: Linux killed a process'));
+  assert.ok(text().includes('Recovered: Internet became offline'));
+  assert.match(card(), /<ol class="incident-events" id="incident-0-events"[^>]* hidden><\/ol>/);
+  assert.equal(memory().getAttribute('aria-controls'), 'incident-0-events');
+  assert.ok(text().includes('Show 2 recorded events'));
+  assert.ok(text().includes('Show 25 recorded events'));
+
+  // Open by click: time, level in text and title for each event, and the restart named as a gap.
+  click(memory());
+  assert.equal(memory().getAttribute('aria-expanded'), 'true');
+  assert.ok(!/id="incident-0-events"[^>]* hidden/.test(card()));
+  for (const label of ['Warning: Memory pressure elevated', 'Gap: Computer restarted', 'Critical: Memory pressure elevated', 'Hide 2 recorded events']) assert.ok(text().includes(label), label);
+  assert.ok(text().indexOf('Warning: Memory') < text().indexOf('Gap: Computer restarted'));
+  assert.ok(card().includes(`<time datetime="${new Date(now - 60 * MIN).toISOString()}">`));
+
+  // Survives a refresh with new data and a clock tick.
+  page.run('workspace = JSON.parse(JSON.stringify(workspace)); workspace.history.episodes[0].eventCount = 3; renderWorkspace();');
+  page.tick();
+  assert.equal(memory().getAttribute('aria-expanded'), 'true');
+  assert.ok(text().includes('Gap: Computer restarted'));
+
+  // Keyboard: Enter and Space toggle the focused row and keep focus on it; Escape closes it.
+  const recovered = incidentEl('t3-local');
+  recovered.focus();
+  assert.equal(press(recovered, 'Enter').defaultPrevented, true);
+  assert.equal(incidentEl('t3-local').getAttribute('aria-expanded'), 'true');
+  assert.equal(document.activeElement.dataset.incident, recovered.dataset.incident, 'focus moved back to the same incident');
+  // Machine-supplied titles are escaped, and dropped events are counted.
+  assert.ok(!card().includes('<img') && !card().includes('<b>'));
+  assert.ok(card().includes('&lt;b&gt;check unavailable&lt;/b&gt;'));
+  assert.ok(text().includes('5 more events not shown'));
+  assert.ok(text().indexOf('5 more events not shown') < text().indexOf('<b>check unavailable</b>'), 'the gap in the list is right after the first event');
+  assert.ok(text().includes('Info: <img src=x> · HTTP check: response recovered'));
+  assert.equal(press(document.activeElement, ' ').defaultPrevented, true);
+  assert.equal(incidentEl('t3-local').getAttribute('aria-expanded'), 'false');
+  press(document.activeElement, ' ');
+  assert.equal(incidentEl('t3-local').getAttribute('aria-expanded'), 'true');
+  press(document.activeElement, ' ', { repeat: true });
+  assert.equal(incidentEl('t3-local').getAttribute('aria-expanded'), 'true', 'a held key does not toggle again');
+  assert.equal(press(document.activeElement, 'Escape').defaultPrevented, true);
+  assert.equal(incidentEl('t3-local').getAttribute('aria-expanded'), 'false');
+  assert.equal(press(document.activeElement, 'Escape').defaultPrevented, false, 'Escape on a closed row does nothing');
+  // A clock tick leaves the cards alone while an incident row has focus; the next data render redraws them.
+  page.run('workspace.history.episodes[1].title = "Renamed"');
+  page.tick();
+  assert.ok(!text().includes('Renamed'));
+  page.run('renderWorkspace()');
+  assert.ok(text().includes('Renamed'));
+  // Escape on one row leaves the other open; a second click closes it.
+  assert.equal(memory().getAttribute('aria-expanded'), 'true');
+  click(memory());
+  assert.equal(memory().getAttribute('aria-expanded'), 'false');
+
+  // An episode that is gone forgets its open state, and the same key with a new start is a new incident.
+  click(memory());
+  page.run('workspace.history.episodes[0].startedAt += 1; renderWorkspace();');
+  assert.equal(memory().getAttribute('aria-expanded'), 'false');
 });
 
 // ---------- At a glance ----------

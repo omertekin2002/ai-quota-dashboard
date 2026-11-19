@@ -124,7 +124,7 @@ test('history survives dashboard restarts, detects failures between readings, an
   const result = await createWorkspaceHistory({ file })(next);
   assert.equal(result.persisted, true);
   assert.equal(result.lastSuccessAt, first.diagnostics.backup.lastSuccessAt);
-  for (const text of ['link dropped', 'T3 Code restarted', 'memory ran out', 'Memory pressure', 'backup failed']) assert.ok(result.events.some((e) => e.title.includes(text)), text);
+  for (const text of ['Network link unstable', 'T3 Code restarted', 'memory ran out', 'Memory pressure', 'backup failed']) assert.ok(result.events.some((e) => e.title.includes(text)), text);
   assert.equal(result.events.filter((e) => e.title === 'Computer monitoring started').length, 1);
   assert.equal(result.samples.length, 2);
   assert.equal(memoryLevel(next), 'critical');

@@ -6,6 +6,7 @@
 // reading happens. Any request that isn't to the test server is aborted and fails the test.
 import { test as base, expect } from '@playwright/test';
 import { createDashboardServer } from '../server.mjs';
+import { incidentEpisodes } from '../workspace-history.mjs';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -473,6 +474,119 @@ test('workspace: the Show/Hide details choice survives a reload through localSto
   expect(await dash.stored()).toBe('closed');
   await dash.reload();
   await expectWorkspaceOpen(page, false);
+});
+
+// ---------- 3b. incidents ----------
+test('incidents: the Incidents card lists an active and a recovered episode in text, before Recent events, without sideways scroll', async ({ page, dash }) => {
+  const ws = healthyWorkspace(), now = Date.now(), MIN = 60_000;
+  const ev = (timestamp, key, title, level = 'info') => ({ id: `${timestamp}:${key}:${title}`, timestamp, level, title });
+  // Long machine-supplied titles, to check that they wrap on a phone.
+  ws.history.events = [
+    ev(now - 10 * MIN, 'memory', 'Memory pressure elevated or available RAM low', 'critical'),
+    ev(now - 60 * MIN, 'ngrok-public', 'ngrok-proxy-llm · Public ngrok route (https://an-unusually-long-subdomain.ngrok-free.app/health): response recovered'),
+    ev(now - 75 * MIN, 'ngrok-public', 'ngrok-proxy-llm · Public ngrok route (https://an-unusually-long-subdomain.ngrok-free.app/health): response failed', 'warning'),
+  ];
+  ws.history.episodes = incidentEpisodes(ws.history.events, now);
+  dash.state.workspace = ws;
+  await dash.open();
+  await workspace(page).toggle.click();
+  await expectWorkspaceOpen(page, true);
+
+  const incidents = page.locator('.incidents-card');
+  await expect(incidents).toBeVisible();
+  const rows = incidents.locator('li.incident');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('Active: Memory pressure elevated or available RAM low');
+  await expect(rows.nth(0)).toContainText('so far');
+  await expect(rows.nth(1)).toContainText('Recovered: ngrok-proxy-llm · Public ngrok route');
+  await expect(rows.nth(1)).toContainText('lasted 15m');
+  await expect(incidents).toContainText('durations are approximate');
+  // Incidents comes right before Recent events.
+  const headings = await page.locator('#workspace-diagnostics h3').allTextContents();
+  expect(headings.indexOf('Incidents')).toBe(headings.indexOf('Recent events') - 1);
+  await incidents.scrollIntoViewIfNeeded();
+  await expectNoSideScroll(page);
+
+  dash.state.workspace = healthyWorkspace();
+  dash.state.workspace.history.episodes = [];
+  await dash.refresh();
+  await expect(incidents).toContainText('No incidents in the last seven days');
+});
+
+test('incidents: an incident opens to its recorded events by tap or keyboard, and stays open through a refresh', async ({ page, dash, isMobile }) => {
+  const ws = healthyWorkspace(), now = Date.now(), MIN = 60_000;
+  const ev = (timestamp, key, title, level = 'info') => ({ id: `${timestamp}:${key}:${title}`, timestamp, level, title });
+  ws.history.events = [
+    ev(now - 10 * MIN, 'memory', 'Memory pressure elevated or available RAM low', 'critical'),
+    ev(now - 20 * MIN, 'boot', 'Computer restarted'),
+    ev(now - 30 * MIN, 'memory', 'Memory pressure elevated or available RAM low', 'warning'),
+    ev(now - 60 * MIN, 'ngrok-public', 'ngrok-proxy-llm · Public ngrok route (https://an-unusually-long-subdomain.ngrok-free.app/health): response recovered'),
+    ev(now - 75 * MIN, 'ngrok-public', 'ngrok-proxy-llm · Public ngrok route (https://an-unusually-long-subdomain.ngrok-free.app/health): response failed', 'warning'),
+    ev(now - 90 * MIN, 'oom', 'Linux killed a process because memory ran out', 'critical'),
+  ];
+  ws.history.episodes = incidentEpisodes(ws.history.events, now);
+  dash.state.workspace = ws;
+  await dash.open();
+  await workspace(page).toggle.click();
+  await expectWorkspaceOpen(page, true);
+
+  const incidents = page.locator('.incidents-card');
+  const rows = incidents.locator('li.incident');
+  await expect(rows).toHaveCount(3);
+  const memory = rows.nth(0).locator('.incident-toggle'), ngrok = rows.nth(1).locator('.incident-toggle');
+  const listOf = (row) => row.locator('.incident-events');
+  // A one-off has no disclosure; the others start collapsed.
+  await expect(rows.nth(2).locator('.incident-toggle')).toHaveCount(0);
+  await expect(memory).toHaveAttribute('aria-expanded', 'false');
+  await expect(listOf(rows.nth(0))).toBeHidden();
+  await expect(memory).toHaveAttribute('aria-controls', await listOf(rows.nth(0)).getAttribute('id'));
+
+  if (isMobile) {
+    await memory.scrollIntoViewIfNeeded();
+    await memory.tap();
+    await expect(memory).toHaveAttribute('aria-expanded', 'true');
+    await expect(listOf(rows.nth(0))).toBeVisible();
+    await expect(listOf(rows.nth(0)).locator('li')).toHaveText([/Warning: Memory pressure elevated/, /Gap: Computer restarted/, /Critical: Memory pressure elevated/]);
+    await ngrok.tap();
+    await expect(listOf(rows.nth(1)).locator('li')).toHaveText([/Warning: ngrok-proxy-llm .* response failed/, /Info: ngrok-proxy-llm .* response recovered/]);
+    await expectNoSideScroll(page);
+    await incidents.screenshot({ path: test.info().outputPath('incident-open-phone.png') });
+    // A second tap closes it.
+    await ngrok.tap();
+    await expect(ngrok).toHaveAttribute('aria-expanded', 'false');
+  } else {
+    await memory.focus();
+    const scrolled = await page.evaluate(() => scrollY);
+    await page.keyboard.press('Enter');
+    await expect(memory).toHaveAttribute('aria-expanded', 'true');
+    await expect(memory).toBeFocused();
+    await expect(listOf(rows.nth(0))).toContainText('Gap: Computer restarted');
+    await page.keyboard.press(' ');
+    await expect(memory).toHaveAttribute('aria-expanded', 'false');
+    await expect(memory).toBeFocused();
+    await page.keyboard.press(' ');
+    await expect(memory).toHaveAttribute('aria-expanded', 'true');
+    expect(await page.evaluate(() => scrollY)).toBe(scrolled);
+    await ngrok.focus();
+    await page.keyboard.press('Enter');
+    await expect(ngrok).toHaveAttribute('aria-expanded', 'true');
+    await incidents.screenshot({ path: test.info().outputPath('incident-open-desktop.png') });
+    await page.keyboard.press('Escape');
+    await expect(ngrok).toHaveAttribute('aria-expanded', 'false');
+    await expect(listOf(rows.nth(1))).toBeHidden();
+    await expect(ngrok).toBeFocused();
+  }
+
+  // A refresh with a newer reading redraws the card; the open incident stays open and shows the new event.
+  const later = Date.now();
+  ws.history.events.unshift(ev(later, 'memory', 'Memory pressure recovered'));
+  ws.history.episodes = incidentEpisodes(ws.history.events, later);
+  dash.state.workspace = ws;
+  await dash.refresh();
+  await expect(rows.nth(0)).toContainText('Recovered: Memory pressure elevated');
+  const opened = rows.filter({ hasText: 'Recovered: Memory pressure elevated' });
+  await expect(opened.locator('.incident-toggle')).toHaveAttribute('aria-expanded', 'true');
+  await expect(opened.locator('.incident-events li').last()).toContainText('Info: Memory pressure recovered');
 });
 
 // ---------- 4. #workspace link ----------
