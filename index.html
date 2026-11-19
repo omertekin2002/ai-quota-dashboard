@@ -208,6 +208,18 @@
   .incident-state.healthy { color: var(--healthy); }
   .incident-state.once { color: var(--ink-2); }
   .incident-caveat { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-muted); font-style: italic; }
+  .incident-toggle { cursor: pointer; border-radius: 4px; }
+  .incident-toggle:focus-visible { outline: 2px solid var(--fill); outline-offset: 2px; }
+  .incident-more { display: block; margin-top: 3px; font-size: 11px; color: var(--ink-muted); }
+  .incident-toggle[aria-expanded="true"] .incident-more { color: var(--ink-2); }
+  .incident-events { grid-column: 2; list-style: none; margin: 6px 0 0; padding: 6px 10px; border: 1px solid var(--hairline); border-radius: 8px;
+    background: var(--page); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
+  .incident-events li + li { margin-top: 4px; }
+  .incident-events time { color: var(--ink-muted); }
+  .incident-event-level { font-weight: 600; }
+  .incident-event-level.warning { color: var(--warning-ink); }
+  .incident-event-level.critical { color: var(--critical-ink); }
+  .incident-events .incident-gap { color: var(--ink-muted); font-style: italic; }
   @media (max-width: 700px) {
     #workspace-meta, #pipeline-meta { order: 3; flex-basis: 100%; margin-left: 0; }
     #workspace-toggle, #pipeline-toggle { margin-left: auto; }
@@ -351,6 +363,7 @@
   let data = null;
   let tableView = false;
   const openWindows = new Set(); // windowKey()s whose details are expanded, kept across re-renders
+  const openIncidents = new Set(); // incidentKey()s whose events are shown, kept across re-renders
   let loading = false;
   let quotaError = false; // the last /api/quotas load failed, so readings on screen aren't live
   let quotaTimeouts = 0; // /api/quotas timeouts in a row since the last successful load
@@ -529,7 +542,8 @@
     return workspace?.supported ? open : true; // loading, unavailable or not Linux: the body holds the only explanation
   }
 
-  function renderWorkspace() {
+  // `tick` is the 15-second clock update, as in render().
+  function renderWorkspace(tick = false) {
     renderWorkspaceGlance();
     const conditions = workspaceConditions(workspace);
     const workspaceOpen = workspaceExpanded(conditions);
@@ -587,7 +601,7 @@
       return `<li><div class="service-name">${esc(s.name)}</div><div class="service-state ${level}"><span class="health-dot" aria-hidden="true"></span>${esc(SERVICE_STATES[s.state] || s.state)}${failedCheck && s.state === 'running' ? ' · Check failed' : ''}</div>${checks}${restarts}</li>`;
     }).join('');
     $('workspace-content').innerHTML = `<div class="machine-metrics">${metrics.join('')}</div><ul class="services" aria-label="Services">${services}</ul>${renderAutoUpdate(workspace.autoUpdate)}`;
-    renderDiagnostics(workspaceOpen);
+    renderDiagnostics(workspaceOpen, tick);
   }
 
   // deploy/'s update timer: one quiet row when all is well, text warnings when it failed or stopped.
@@ -635,10 +649,14 @@
   }
 
   // The diagnostics stay rendered while the panel is collapsed, so opening it shows the latest reading at once.
-  function renderDiagnostics(open) {
+  function renderDiagnostics(open, tick = false) {
     const target = $('workspace-diagnostics'), d = workspace?.diagnostics;
     target.hidden = !workspace?.supported || !d || !open;
     if (!workspace?.supported || !d) return;
+    // Replacing the cards would drop keyboard focus from an incident row, so put it back afterwards. A clock tick
+    // leaves them alone while one has focus, as render() does for windows, so a screen reader doesn't read it again.
+    const focused = document.activeElement?.matches?.('.incident-toggle') ? document.activeElement.dataset.incident : null;
+    if (tick && focused != null) return;
     const history = workspace.history;
     const pressure = ['cpu', 'memory', 'io'].map((name) => {
       const value = d.pressure[name]?.some?.avg10;
@@ -670,14 +688,36 @@
       ${renderIncidents(history?.episodes)}
       <article class="diagnostic-card"><h3>Recent events</h3><ul class="diagnostic-list">${events || '<li class="diagnostic-detail">No recent events</li>'}</ul><p class="diagnostic-detail">Latest 10 events · sampled every 30 seconds, even with this page closed. ${history?.persisted === false ? 'History could not be saved.' : 'History is retained for seven days.'}</p></article>
     </div>`;
+    if (focused != null) [...target.querySelectorAll('.incident-toggle')].find((el) => el.dataset.incident === focused)?.focus({ preventScroll: true });
+  }
+
+  // Identifies an episode across refreshes: its condition and when it started (null once the start is pruned).
+  const incidentKey = (e) => JSON.stringify([String(e.key ?? ''), e.startedAt ?? null]);
+  // Whether an episode has more to show than its row: an older server sends no `events`, a one-off has one.
+  const hasIncidentEvents = (e) => Array.isArray(e.events) && (e.events.length > 1 || e.omittedEvents > 0);
+  const LEVEL_TEXT = { critical: 'Critical', warning: 'Warning', info: 'Info' };
+  const GAP_TEXT = { boot: 'Computer restarted', monitor: 'Monitoring restarted' };
+
+  // The recorded events behind an episode, oldest first, with level and gaps named in text.
+  function incidentEventsHtml(e) {
+    const items = e.events.map((ev) => {
+      const at = `<time datetime="${new Date(ev.timestamp).toISOString()}">${esc(fmtFull(ev.timestamp))}</time>`;
+      if (ev.gap) return `<li class="incident-gap">${at} · Gap: ${esc(GAP_TEXT[ev.key] || ev.title)}</li>`;
+      const level = ['critical', 'warning'].includes(ev.level) ? ev.level : '';
+      return `<li>${at} · <span class="incident-event-level ${level}">${esc(LEVEL_TEXT[ev.level] || ev.level || 'Unknown')}:</span> ${esc(ev.title)}</li>`;
+    });
+    if (e.omittedEvents > 0) items.splice(1, 0, `<li class="incident-gap">${e.omittedEvents} more event${e.omittedEvents === 1 ? '' : 's'} not shown</li>`);
+    return items.join('');
   }
 
   // Episodes built by incidentEpisodes() in workspace-history.mjs: active ones first, then the newest.
   function renderIncidents(episodes) {
     if (!Array.isArray(episodes)) return ''; // a server from before /api/workspace reported them
     const shown = episodes.slice(0, 10);
+    const live = new Set(episodes.map(incidentKey));
+    for (const key of openIncidents) if (!live.has(key)) openIncidents.delete(key);
     const time = (ms) => `<time datetime="${new Date(ms).toISOString()}">${esc(fmtFull(ms))}</time>`;
-    const rows = shown.map((e) => {
+    const rows = shown.map((e, i) => {
       const level = e.level === 'critical' ? 'critical' : e.level === 'warning' ? 'warning' : '';
       const [label, labelClass, when] = e.state === 'active' ? ['Active', level, `Active since ${time(e.startedAt)} · ${esc(fmtDur((Date.now() - e.startedAt) / 1000))} so far`]
         : e.state === 'once' ? ['Observed once', 'once', `Observed once at ${time(e.startedAt)}`]
@@ -685,7 +725,14 @@
         : ['Recovered', 'healthy', `${time(e.startedAt)} → ${time(e.endedAt)} · lasted ${esc(fmtDur((e.endedAt - e.startedAt) / 1000))}`];
       const updates = e.eventCount > 2 || (e.state === 'active' && e.eventCount > 1) ? ` · ${e.eventCount} changes recorded` : '';
       const caveats = (e.caveats || []).map((c) => `<span class="incident-caveat">${esc(c)}</span>`).join('');
-      return `<li class="event-row incident ${e.state === 'recovered' ? '' : level}"><span class="health-dot" aria-hidden="true"></span><div class="event-title"><span class="incident-state ${labelClass}">${label}:</span> ${esc(e.title)}<span class="event-time">${when}${updates}</span>${caveats}</div></li>`;
+      const summary = `<span class="incident-state ${labelClass}">${label}:</span> ${esc(e.title)}<span class="event-time">${when}${updates}</span>${caveats}`;
+      const rowStart = `<li class="event-row incident ${e.state === 'recovered' ? '' : level}"><span class="health-dot" aria-hidden="true"></span>`;
+      if (!hasIncidentEvents(e)) return `${rowStart}<div class="event-title">${summary}</div></li>`;
+      // An inline disclosure like a window's details: click or tap, Enter or Space toggle it, Escape closes it.
+      const key = incidentKey(e), open = openIncidents.has(key), id = `incident-${i}-events`;
+      const count = e.events.filter((ev) => !ev.gap).length + (e.omittedEvents || 0);
+      return `${rowStart}<div class="event-title incident-toggle" role="button" tabindex="0" aria-expanded="${open}" aria-controls="${id}" data-incident="${esc(key)}">${summary}<span class="incident-more" aria-hidden="true">${open ? '▾ Hide' : '▸ Show'} ${count} recorded events</span></div>`
+        + `<ol class="incident-events" id="${id}" aria-label="Recorded events, oldest first"${open ? '' : ' hidden'}>${open ? incidentEventsHtml(e) : ''}</ol></li>`;
     }).join('');
     const more = episodes.length > shown.length ? `Showing ${shown.length} of ${episodes.length} incidents. ` : '';
     return `<article class="diagnostic-card incidents-card"><h3>Incidents</h3><ul class="diagnostic-list">${rows || '<li class="diagnostic-detail">No incidents in the last seven days</li>'}</ul><p class="diagnostic-detail">${more}A failure and its recovery form one incident. Readings are sampled every 30 seconds, so durations are approximate and brief changes can fall between readings.</p></article>`;
@@ -1332,6 +1379,29 @@
     }
   });
 
+  // An incident's recorded events: the same inline disclosure as a window's details.
+  function setIncidentOpen(el, open) {
+    if (open) openIncidents.add(el.dataset.incident); else openIncidents.delete(el.dataset.incident);
+    renderWorkspace(); // keeps focus on the incident if it had it
+  }
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest?.('.incident-toggle');
+    if (!el) return;
+    if (typeof getSelection === 'function' && String(getSelection())) return; // the user was selecting text to copy
+    setIncidentOpen(el, !openIncidents.has(el.dataset.incident));
+  });
+  document.addEventListener('keydown', (e) => {
+    const el = e.target.closest?.('.incident-toggle');
+    if (!el || el !== e.target || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault(); // Space would scroll the page
+      if (!e.repeat) setIncidentOpen(el, !openIncidents.has(el.dataset.incident));
+    } else if (e.key === 'Escape' && openIncidents.has(el.dataset.incident)) {
+      e.preventDefault();
+      setIncidentOpen(el, false);
+    }
+  });
+
   // Hover preview with the same numbers, only for a mouse or trackpad: touch and keyboard use the details instead.
   const tip = $('tip');
   const canHover = () => typeof matchMedia === 'function' && matchMedia('(hover: hover) and (pointer: fine)').matches;
@@ -1367,7 +1437,7 @@
   setInterval(() => document.visibilityState === 'visible' && loadWorkspace(), 30_000);
   setInterval(() => document.visibilityState === 'visible' && loadPipeline(), 60_000);
   setInterval(load, 120_000);
-  setInterval(() => { render(true); renderWorkspace(); renderPipeline(); }, 15_000);
+  setInterval(() => { render(true); renderWorkspace(true); renderPipeline(); }, 15_000);
 </script>
 </body>
 </html>

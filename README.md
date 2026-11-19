@@ -92,6 +92,7 @@ Below the panel, behind the same **Show details** button, **Computer diagnostics
   - When the computer restarted, or monitoring started over, during an incident, the row says so: the recovery may only have been seen once it was back.
   - A recovery whose failure is older than the kept history shows as recovered with "start not retained", never as active. A network change is not treated that way, because it may be a switch between two networks.
   - Readings are 30 seconds apart, so durations are approximate and brief changes can fall between readings.
+  - An incident built from more than one event opens, by tap, click, Enter or Space (Escape closes it), to the recorded events it was built from, oldest first, each with its time, level in text and title, plus the restart or monitoring gaps behind its caveat. They come from the same retained history, as `events` on each episode except one-offs, up to 20 per incident: the first, the newest and any gaps are kept, and the rest are counted as "N more events not shown". An open incident stays open across refreshes.
 
 ### Agentctl & build-workflow
 

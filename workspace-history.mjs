@@ -19,6 +19,9 @@ export const MEMORY_SETTLE_MS = 5 * 60_000;
 // come in bursts 30 seconds to 2 minutes apart, separated by quiet hours; each burst is one incident.
 export const LINK_SETTLE_MS = 15 * 60_000;
 
+// The most entries an episode's `events` list carries, so /api/workspace has a hard bound per episode.
+export const MAX_EPISODE_EVENTS = 20;
+
 const STOPPED_STATES = ['Z', 'T', 't'];
 const isPressure = (level) => level === 'warning' || level === 'critical';
 // Older builds recorded each rise of the link-drop counter as its own event.
@@ -74,6 +77,21 @@ function incidentRole(key, event) {
   return event.level === 'info' ? 'close' : 'open';
 }
 
+// Bounds an episode's evidence at MAX_EPISODE_EVENTS entries. Over the cap it keeps the first entry (what
+// opened it), the newest (usually what ended it), then the restart and monitoring gaps behind its caveats,
+// then the newest of the rest. `omittedEvents` counts the dropped non-gap events, so an episode's eventCount
+// equals its non-gap entries plus omittedEvents.
+function capEpisodeEvents(events) {
+  if (events.length <= MAX_EPISODE_EVENTS) return { events };
+  const keep = new Set([events[0], events.at(-1)]);
+  const newestFirst = events.slice(1, -1).reverse();
+  for (const e of [...newestFirst.filter((e) => e.gap), ...newestFirst.filter((e) => !e.gap)]) {
+    if (keep.size >= MAX_EPISODE_EVENTS) break;
+    keep.add(e);
+  }
+  return { events: events.filter((e) => keep.has(e)), omittedEvents: events.filter((e) => !keep.has(e) && !e.gap).length };
+}
+
 /**
  * Groups retained events into incidents (episodes), newest first with active ones on top. Rules:
  * - A warning or critical event opens an episode for its key (internet, network, memory, a service unit,
@@ -94,6 +112,9 @@ function incidentRole(key, event) {
  * - A recovery that is the oldest retained event for its key ends an episode whose start was pruned:
  *   it is 'recovered' with startedAt null. `Network connected or changed` is skipped there, because it
  *   also records a switch between two networks.
+ * Each episode but a one-off (whose row is its only event) lists its evidence in `events`, oldest first: `{ timestamp, level, title }` for every retained
+ * event that opened, extended or ended it, plus the `boot`/`monitor` events behind a caveat, marked
+ * `gap: true` with their `key`. See capEpisodeEvents() for the bound.
  */
 export function incidentEpisodes(events, now) {
   const chronological = events
@@ -104,6 +125,7 @@ export function incidentEpisodes(events, now) {
     .map(({ event }) => event);
   const episodes = [], open = new Map(), seen = new Set(), gaps = [];
   const worst = (a, b) => ((LEVEL_RANK[b] ?? 0) > (LEVEL_RANK[a] ?? 0) ? b : a);
+  const entry = (event) => ({ timestamp: event.timestamp, level: event.level, title: event.title });
   for (const event of chronological) {
     const key = keyOf(event), role = incidentRole(key, event);
     if (role === 'gap') gaps.push(event);
@@ -114,9 +136,11 @@ export function incidentEpisodes(events, now) {
       episodes.push({ key, title: event.title, level: event.level, startedAt: event.timestamp, endedAt: event.timestamp, state: 'once', eventCount: 1, caveats: [], lastAt: event.timestamp });
     } else if (role === 'open') {
       const episode = open.get(key);
-      if (episode) Object.assign(episode, { level: worst(episode.level, event.level), eventCount: episode.eventCount + 1, lastAt: event.timestamp });
-      else {
-        const created = { key, title: event.title, level: event.level, startedAt: event.timestamp, endedAt: null, state: 'active', eventCount: 1, caveats: [], lastAt: event.timestamp };
+      if (episode) {
+        Object.assign(episode, { level: worst(episode.level, event.level), eventCount: episode.eventCount + 1, lastAt: event.timestamp });
+        episode.events.push(entry(event));
+      } else {
+        const created = { key, title: event.title, level: event.level, startedAt: event.timestamp, endedAt: null, state: 'active', eventCount: 1, caveats: [], events: [entry(event)], lastAt: event.timestamp };
         open.set(key, created);
         episodes.push(created);
       }
@@ -124,9 +148,10 @@ export function incidentEpisodes(events, now) {
       const episode = open.get(key);
       if (episode) {
         Object.assign(episode, { endedAt: event.timestamp, state: 'recovered', eventCount: episode.eventCount + 1, lastAt: event.timestamp });
+        episode.events.push(entry(event));
         open.delete(key);
       } else if (first && key !== 'network' && key !== 'backup') {
-        episodes.push({ key, title: event.title, level: event.level, startedAt: null, endedAt: event.timestamp, state: 'recovered', eventCount: 1, caveats: ['Start not retained; it is older than the kept history'], lastAt: event.timestamp });
+        episodes.push({ key, title: event.title, level: event.level, startedAt: null, endedAt: event.timestamp, state: 'recovered', eventCount: 1, caveats: ['Start not retained; it is older than the kept history'], events: [entry(event)], lastAt: event.timestamp });
       }
     }
   }
@@ -135,7 +160,12 @@ export function incidentEpisodes(events, now) {
     const end = episode.endedAt ?? now, inside = gaps.filter((g) => g.timestamp > episode.startedAt && g.timestamp <= end);
     if (inside.some((g) => keyOf(g) === 'boot')) episode.caveats.push('Computer restarted during this incident; the recovery may only have been seen once it was back');
     if (inside.some((g) => keyOf(g) === 'monitor')) episode.caveats.push('Monitoring restarted during this incident; the recovery may only have been seen once it resumed');
+    if (!inside.length) continue;
+    // Both lists are oldest first; a gap in the same reading as an event goes after it, as the recorder adds it later.
+    const merged = [...episode.events, ...inside.map((g) => ({ ...entry(g), gap: true, key: keyOf(g) }))];
+    episode.events = merged.map((e, i) => ({ e, i })).sort((a, b) => a.e.timestamp - b.e.timestamp || a.i - b.i).map(({ e }) => e);
   }
+  for (const episode of episodes) if (episode.events) Object.assign(episode, capEpisodeEvents(episode.events));
   const rank = (e) => (e.state === 'active' ? 1 : 0);
   return episodes.sort((a, b) => rank(b) - rank(a) || b.lastAt - a.lastAt).map(({ lastAt, ...episode }) => episode);
 }
