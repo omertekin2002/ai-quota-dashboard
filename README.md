@@ -138,7 +138,7 @@ The full history file (about 150 KB at the 1000-event cap) is rewritten only whe
 
 Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process memory, filesystem space, NetworkManager, and Tailscale status, and makes bounded HTTP(S) checks. It never controls services or changes power/network settings. The monitored units are listed in `workspace.mjs`, and health endpoints in `diagnostics.mjs`; unsupported operating systems still show quotas normally. No new packages or elevated privileges are needed.
 
-Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s. `test/deploy.test.mjs` runs `deploy/update.sh` against a temporary git origin and clone with a fake `systemctl`, and `deploy/install.sh` against a temporary home.
+Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s. `test/quotas-contract.test.mjs` pins the `/api/quotas` fields build-workflow reads (see [`/api/quotas` is an API](#apiquotas-is-an-api)). `test/deploy.test.mjs` runs `deploy/update.sh` against a temporary git origin and clone with a fake `systemctl`, and `deploy/install.sh` against a temporary home.
 
 `npm test` needs no install. The browser checks do: run `npm ci`, `npx playwright install chromium` once, then `npm run test:browser`. They live in `e2e/` and start the real server (`createDashboardServer()`) on a random port with fake collectors, so they read no credentials, providers, `agentctl` or `/proc`, and any request to anything but that server fails the test. Headless Chromium loads the page at phone (390×844, touch) and desktop (1280×800) width and checks that the page never scrolls sideways, that quota cards sit under At a glance, that window details open by tap, click, Enter or Space, close with Escape, keep focus and survive a refresh, that a failed workspace HTTP check opens the Workspace computer panel and names it in the glance tile, that Show/Hide details is remembered across reloads, that the glance tile's Workspace link opens a collapsed panel, that the Agent pipeline collapses to one summary line while nothing needs you, opens by keyboard, remembers Show/Hide across reloads, reopens for a new attention item and opens from the Needs you link (also when the URL already ends in `#pipeline`), that a closed Agent pipeline repo stays closed through a refresh, and that a failing quota collector shows "Couldn't refresh" while the other panels keep working. A failed run keeps a trace in `test-results/` (`npx playwright show-trace <file>`).
 
@@ -161,6 +161,28 @@ Usage numbers come from `api.anthropic.com/api/oauth/usage` and `chatgpt.com/bac
 Antigravity quotas are collected directly from Google's `v1internal:retrieveUserQuotaSummary` API on `daily-cloudcode-pa.googleapis.com` and `cloudcode-pa.googleapis.com`, using the login T3 already saved. T3 does not need to be running. The collector reads both endpoints and keeps the higher usage for duplicate buckets; older accounts fall back to `fetchAvailableModels`. Cards show Gemini, Gemini Argon, and shared Claude/GPT buckets as reported, including their five-hour and weekly windows. Legacy model quotas without a reported cadence get no invented window length, billing cycle, or pace projection. Untouched buckets with a moving reset of now plus the window length get no countdown.
 
 The collector renews Google's access token using the saved refresh token and retains it only in memory, until one minute before expiry. It never writes to T3's login files, launches AGY, or makes a model request. Account email is optional and comes from Google's user-info endpoint. Requests use fixed Google destinations, reject redirects, time out after 10 seconds each, and have a 30-second total budget per login. Missing/malformed quota responses retain the last successful reading with a stale warning. Enterprise, API-key, and gateway logins are not collected. These Google quota APIs are internal and may change.
+
+## `/api/quotas` is an API
+
+The page isn't the only reader of `GET /api/quotas`. build-workflow's `src/quota.ts` reads it to pace workers and plans, decide on Codex reviews and pick council members. It relies on these fields:
+
+| Where | Field | Type and unit |
+|---|---|---|
+| top level | `accounts` | array |
+| account | `provider` | `"claude"`, `"openai"` or `"antigravity"` |
+| account | `windows` | array |
+| account | `limitReached` | boolean |
+| account | `fetchedAt` | epoch **milliseconds** of the successful reading. A stale account served from the last good reading keeps that reading's time, not the time of the failed attempt. |
+| window | `id` | string |
+| window | `usedPct` | number, or `null` when unknown |
+| window | `resetsAt` | epoch **milliseconds**, or `null` |
+| window | `windowSec` | seconds, or `null` |
+
+An account whose reading failed has an `error` string. If there was an earlier good reading, the account is that reading with `stale: true`; if there wasn't, it has no `windows`, `fetchedAt` or `limitReached`.
+
+Window ids it looks for: Claude `seven_day` (604800) and `five_hour` (18000), which is absent when Anthropic reports `five_hour: null`; Claude model-scoped 5-hour windows, found by `windowSec` 18000; Codex `primary` (5-hour) and `secondary` (weekly); Antigravity `gemini-*` bucket ids, with `gemini-argon-*` told apart, `windowSec` 604800 for weekly and 18000 for 5-hour.
+
+Changes to this API are **additive only**. New fields are fine. Renaming or removing a field above, or changing its type or unit (for example seconds instead of milliseconds), breaks build-workflow's quota gating. `test/quotas-contract.test.mjs` pins these fields: it runs the real collector on faked upstream replies, reads `/api/quotas` over HTTP, and fails with a message naming `src/quota.ts` when one of them changes.
 
 ## Running on another machine via Tailscale
 
