@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkspaceHistory, historyForApi, historySpan, incidentEpisodes, isRoutineEvent, pruneEvents, readHistoryFile, stateFileOf, MAX_EVENTS, API_EVENTS, API_EPISODES, FULL_WRITE_MS, MAX_ROUTINE_EVENTS, MAX_EPISODE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS, MONITOR_GAP_MS } from '../workspace-history.mjs';
+import { createWorkspaceHistory, historyForApi, historySpan, incidentEpisodes, isRoutineEvent, pruneEvents, readHistoryFile, stateFileOf, MAX_EVENTS, API_EVENTS, API_EPISODES, FULL_WRITE_MS, MAX_ROUTINE_EVENTS, MAX_EPISODE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS, MONITOR_GAP_MS, UNREACHABLE_QUIET_MS } from '../workspace-history.mjs';
 
 const DAY = 86400_000, START = 1_800_000_000_000;
 
@@ -1009,4 +1009,111 @@ test('a full seven-day history at the cap stays a bounded file, and each reading
   t.diagnostic(`full file at ${MAX_EVENTS} events: ${fullSize} bytes; companion file: ${stateSize} bytes`);
   assert.ok(fullSize < 250_000, `${fullSize} bytes`);
   assert.ok(stateSize < 10_000, `${stateSize} bytes`);
+});
+
+// ---------- Auto-update runs that couldn't reach GitHub ----------
+const RUN = 15 * MIN;
+const updateEvents = (result) => result.events.filter((e) => e.id.includes(':auto-update:')).map((e) => [e.title, e.level]).reverse();
+
+// Records one reading per 15-minute updater run, each with that run's state, starting from an ok run at START.
+async function updaterRuns(record, states, s = snapshot(START)) {
+  let result;
+  s.autoUpdate = { state: 'ok', timerActive: true, lastRunAt: START, lastExitStatus: 0 };
+  await record(s);
+  for (const [i, state] of states.entries()) {
+    s.generatedAt = START + (i + 1) * RUN;
+    s.autoUpdate = { state, timerActive: true, lastRunAt: s.generatedAt, lastExitStatus: state === 'ok' ? 0 : 1 };
+    result = await record(s);
+  }
+  return result;
+}
+
+test('GitHub unreachable for an hour, then a successful run, records nothing', async () => {
+  const record = createWorkspaceHistory();
+  const during = await updaterRuns(record, ['unreachable', 'unreachable', 'unreachable', 'unreachable']);
+  assert.deepEqual(updateEvents(during), []);
+  assert.deepEqual(during.autoUpdate, { unreachableSince: START + RUN, lastOkAt: START, unreachableForMs: 3 * RUN, unreachableWarning: false });
+  const s = snapshot(START + 5 * RUN);
+  s.autoUpdate = { state: 'ok', timerActive: true, lastRunAt: START + 5 * RUN, lastExitStatus: 0 };
+  const after = await record(s);
+  assert.deepEqual(updateEvents(after), []);
+  assert.deepEqual(after.autoUpdate, { unreachableSince: null, lastOkAt: START + 5 * RUN, unreachableForMs: null, unreachableWarning: false });
+  assert.equal(after.episodes.filter((e) => e.key === 'auto-update').length, 0);
+});
+
+test('GitHub unreachable past two hours records one warning, and the next successful run its recovery', async () => {
+  assert.equal(UNREACHABLE_QUIET_MS, 2 * 3600_000);
+  const record = createWorkspaceHistory();
+  // 8 runs is two hours after the first unreachable one; the warning comes with the ninth.
+  const eight = await updaterRuns(record, Array(8).fill('unreachable'));
+  assert.deepEqual(updateEvents(eight), []);
+  assert.equal(eight.autoUpdate.unreachableWarning, false);
+  const s = snapshot(START);
+  const past = await updaterRuns(createWorkspaceHistory(), [...Array(12).fill('unreachable'), 'running'], s);
+  // The run in progress keeps the streak and its warning.
+  assert.deepEqual(updateEvents(past), [["Dashboard auto-update couldn't reach GitHub for 2 h", 'warning']]);
+  assert.equal(past.autoUpdate.unreachableSince, START + RUN);
+  assert.equal(past.autoUpdate.unreachableForMs, 12 * RUN);
+  assert.equal(past.autoUpdate.unreachableWarning, true);
+  const [episode] = past.episodes.filter((e) => e.key === 'auto-update');
+  assert.equal(episode.state, 'active');
+  assert.equal(episode.startedAt, START + 9 * RUN);
+});
+
+test('a GitHub-unreachable streak that passes two hours ends with a recovery on the next successful run', async () => {
+  const result = await updaterRuns(createWorkspaceHistory(), [...Array(10).fill('unreachable'), 'ok', 'unreachable', 'ok']);
+  assert.deepEqual(updateEvents(result), [
+    ["Dashboard auto-update couldn't reach GitHub for 2 h", 'warning'],
+    ['Dashboard auto-update recovered', 'info'],
+  ]);
+  const [episode] = result.episodes.filter((e) => e.key === 'auto-update');
+  assert.equal(episode.state, 'recovered');
+  assert.equal(episode.endedAt, START + 11 * RUN);
+  assert.equal(result.autoUpdate.lastOkAt, START + 13 * RUN);
+});
+
+test('a real failure records itself at once, even straight after GitHub was unreachable, and a refusal stays one incident', async () => {
+  const result = await updaterRuns(createWorkspaceHistory(), ['unreachable', 'failed', 'failed', 'unreachable', 'ok']);
+  assert.deepEqual(updateEvents(result), [
+    ['Dashboard auto-update failed (exit 1)', 'warning'],
+    ['Dashboard auto-update recovered', 'info'],
+  ]);
+  // A failure that turns into an unreachable streak past two hours adds the warning to the same incident.
+  const long = await updaterRuns(createWorkspaceHistory(), ['failed', ...Array(10).fill('unreachable'), 'ok']);
+  assert.deepEqual(updateEvents(long), [
+    ['Dashboard auto-update failed (exit 1)', 'warning'],
+    ["Dashboard auto-update couldn't reach GitHub for 2 h", 'warning'],
+    ['Dashboard auto-update recovered', 'info'],
+  ]);
+  assert.equal(long.episodes.filter((e) => e.key === 'auto-update').length, 1);
+});
+
+test('the unreachable streak and the last successful run survive a restart, and an older history file still loads', async (t) => {
+  const file = await tempFile(t), s = snapshot(START);
+  await updaterRuns(createWorkspaceHistory({ file }), Array(6).fill('unreachable'), s);
+  // The dashboard restarts with its saved history; the streak goes on from where it was.
+  s.generatedAt = START + 7 * RUN;
+  s.autoUpdate = { state: 'unreachable', timerActive: true, lastRunAt: s.generatedAt, lastExitStatus: 1 };
+  const reloaded = createWorkspaceHistory({ file });
+  let result = await reloaded(s);
+  assert.deepEqual(result.autoUpdate, { unreachableSince: START + RUN, lastOkAt: START, unreachableForMs: 6 * RUN, unreachableWarning: false });
+  for (const i of [8, 9]) {
+    s.generatedAt = START + i * RUN;
+    s.autoUpdate = { ...s.autoUpdate, lastRunAt: s.generatedAt };
+    result = await reloaded(s);
+  }
+  assert.deepEqual(updateEvents(result), [["Dashboard auto-update couldn't reach GitHub for 2 h", 'warning']]);
+  const stored = await readHistoryFile(file);
+  assert.equal(stored.previous.autoUpdate.unreachableSince, START + RUN);
+  assert.equal(stored.previous.autoUpdate.lastOkAt, START);
+
+  // A file from a build before this: no streak, no last success, and its recorded failure is still open.
+  const oldFile = await tempFile(t);
+  await writeFile(oldFile, JSON.stringify({ version: 1, events: [], samples: [], previous: { ...quietPrevious(START), autoUpdate: { result: 'failed', timerActive: true } }, lastSuccessAt: null, startedAt: START }));
+  const old = createWorkspaceHistory({ file: oldFile }), o = snapshot(START + 30_000);
+  o.autoUpdate = { state: 'unreachable', timerActive: true, lastRunAt: START + 30_000, lastExitStatus: 1 };
+  assert.deepEqual((await old(o)).autoUpdate, { unreachableSince: START + 30_000, lastOkAt: null, unreachableForMs: 0, unreachableWarning: false });
+  o.generatedAt += RUN;
+  o.autoUpdate = { state: 'ok', timerActive: true, lastRunAt: o.generatedAt, lastExitStatus: 0 };
+  assert.deepEqual(updateEvents(await old(o)), [['Dashboard auto-update recovered', 'info']]);
 });

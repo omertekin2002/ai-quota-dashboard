@@ -188,10 +188,23 @@ async function serviceStatus(run) {
   return SERVICES.map((s) => services.find((v) => v.unit === s.unit));
 }
 
-// Read-only view of deploy/'s updater units. Never starts, restarts or enables them.
-async function autoUpdateStatus(run) {
+// update.sh's own refusal when `git fetch` can't reach GitHub (DNS, network, a timeout). Any other refusal (local
+// changes, wrong branch, detached HEAD, diverged main, a failed restart) is a real failure.
+const FETCH_REFUSAL = /^ai-quota-dashboard-update: refusing: git fetch \S+ \S+ failed or timed out\b/m;
+const ANY_REFUSAL = /^ai-quota-dashboard-update: refusing: /gm;
+
+// Whether a failed run's journal lines show that it only couldn't fetch from GitHub. Null or unreadable output
+// (journalctl missing, no access, no entries) is not evidence, so it stays a failure.
+export function isFetchRefusal(lines) {
+  const text = String(lines || '');
+  return FETCH_REFUSAL.test(text) && (text.match(ANY_REFUSAL) || []).length === 1;
+}
+
+// Read-only view of deploy/'s updater units. Never starts, restarts or enables them. `classified` caches the
+// journal reading of the last failed run, keyed by its exit time, so journalctl runs at most once per run.
+async function autoUpdateStatus(run, classified) {
   const raw = await run('systemctl', ['--user', 'show', 'ai-quota-dashboard-update.service', 'ai-quota-dashboard-update.timer',
-    '--property=Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime', '--no-pager']);
+    '--property=Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime', '--no-pager']);
   const units = unitProperties(raw);
   const service = units.get('ai-quota-dashboard-update.service'), timer = units.get('ai-quota-dashboard-update.timer');
   const unknown = { state: 'unknown', timerActive: null, lastRunAt: null, lastExitStatus: null, nextRunAt: null };
@@ -200,9 +213,19 @@ async function autoUpdateStatus(run) {
   if (service.LoadState !== 'loaded' || !['loaded', 'not-found'].includes(timer.LoadState)) return unknown;
   const finishedAt = systemdTime(service.ExecMainExitTimestamp);
   const exitStatus = finishedAt ? number(service.ExecMainStatus) : null;
-  const state = ['active', 'activating', 'deactivating', 'reloading'].includes(service.ActiveState) ? 'running'
+  let state = ['active', 'activating', 'deactivating', 'reloading'].includes(service.ActiveState) ? 'running'
     : service.ActiveState === 'failed' || (service.Result && service.Result !== 'success') ? 'failed'
     : !finishedAt ? 'never-run' : exitStatus !== 0 ? 'failed' : 'ok';
+  const startedAt = systemdTime(service.ExecMainStartTimestamp);
+  if (state === 'failed' && finishedAt && startedAt && startedAt <= finishedAt) {
+    if (classified.finishedAt !== finishedAt) {
+      // Only this run's lines: from its start to a second after it exited, the newest 20 at most.
+      const lines = await run('journalctl', ['--user', '-u', 'ai-quota-dashboard-update.service',
+        `--since=@${Math.floor(startedAt / 1000)}`, `--until=@${Math.floor(finishedAt / 1000) + 1}`, '-o', 'cat', '-n', '20', '--no-pager']);
+      Object.assign(classified, { finishedAt, unreachable: isFetchRefusal(lines) });
+    }
+    if (classified.unreachable) state = 'unreachable';
+  }
   return {
     state,
     // A missing timer means nothing schedules the updater, the same as a stopped one.
@@ -219,6 +242,7 @@ export function createWorkspaceMonitor({
   now = Date.now, platform = process.platform, fetchImpl = fetch, historyFile = null, workflowHome, repoRoot, t3Worktrees,
 } = {}) {
   let cache = null, inflight = null;
+  const classified = { finishedAt: null, unreachable: false };
   const diagnostics = createDiagnostics({ procRoot, run, fetchImpl, now });
   const recordHistory = createWorkspaceHistory({ file: historyFile });
   const agentWorkflow = createAgentWorkflowMonitor({ procRoot, run, now, workflowHome, repoRoot, t3Worktrees });
@@ -229,7 +253,7 @@ export function createWorkspaceMonitor({
       if (platform !== 'linux') return { generatedAt: now(), supported: false };
       const [power, sensors, memory, internet, services, autoUpdate, model, uptime, diagnostic, workflow] = await Promise.all([
         powerStatus(sysRoot), temperatures(sysRoot), memoryStatus(procRoot), internetStatus(run, probe, sysRoot),
-        serviceStatus(run), autoUpdateStatus(run), text(path.join(sysRoot, 'class/dmi/id/product_name')), text(path.join(procRoot, 'uptime')), diagnostics(), agentWorkflow(),
+        serviceStatus(run), autoUpdateStatus(run, classified), text(path.join(sysRoot, 'class/dmi/id/product_name')), text(path.join(procRoot, 'uptime')), diagnostics(), agentWorkflow(),
       ]);
       diagnostic.agentWorkflow = workflow;
       const snapshot = {
@@ -237,7 +261,10 @@ export function createWorkspaceMonitor({
         uptimeSec: number(uptime?.split(/\s+/)[0]) ?? os.uptime(),
         power, temperatures: sensors, memory, internet, services, autoUpdate, diagnostics: diagnostic,
       };
-      snapshot.history = historyForApi(await recordHistory(snapshot));
+      // The history keeps when GitHub became unreachable and when a run last succeeded, across restarts.
+      const { autoUpdate: updateHistory, ...history } = await recordHistory(snapshot);
+      if (autoUpdate && updateHistory) Object.assign(autoUpdate, updateHistory);
+      snapshot.history = historyForApi(history);
       snapshot.diagnostics.backup.lastSuccessAt = snapshot.history.lastSuccessAt;
       snapshot.diagnostics.memoryLevel = memoryLevel(snapshot);
       return snapshot;

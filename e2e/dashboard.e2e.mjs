@@ -73,6 +73,14 @@ function failingCheckWorkspace() {
   return ws;
 }
 
+// The updater's last run couldn't reach GitHub, 45 minutes into the streak: still within the 2-hour threshold.
+function unreachableUpdaterWorkspace({ warning = false } = {}) {
+  const ws = healthyWorkspace(), now = Date.now(), forMs = warning ? 3 * HOUR : 45 * 60_000;
+  ws.autoUpdate = { ...ws.autoUpdate, state: 'unreachable', lastExitStatus: 1, lastOkAt: now - forMs - 15 * 60_000,
+    unreachableSince: now - forMs, unreachableForMs: forMs, unreachableWarning: warning };
+  return ws;
+}
+
 function pipelineOf() {
   const now = Date.now();
   const iso = (ms) => new Date(ms).toISOString();
@@ -468,6 +476,33 @@ test('workspace warning: a failed HTTP check opens the panel, the tile names it,
   await dash.reload();
   await expectWorkspaceOpen(page, true);
   expect(await dash.stored()).toBe('closed');
+});
+
+test('workspace: an updater that briefly couldn’t reach GitHub stays a quiet All OK, and warns once it has gone on for hours', async ({ page, dash }) => {
+  dash.state.workspace = unreachableUpdaterWorkspace();
+  await dash.open();
+  await expect(page.locator('#glance-workspace')).toHaveText('✓ All OK');
+  await expectWorkspaceOpen(page, false);
+  await expect(workspace(page).meta).toContainText('✓ All OK · up 3d');
+  await workspace(page).toggle.click();
+  const row = workspace(page).content.locator('.auto-update');
+  await expect(row).toContainText("Auto-update: couldn't reach GitHub at");
+  await expect(row).toContainText('last updated');
+  await expect(row).not.toContainText('⚠');
+  await expect(row.locator('.warning')).toHaveCount(0);
+  await expectNoSideScroll(page);
+  await workspace(page).toggle.click();
+  await expectWorkspaceOpen(page, false);
+
+  // Past the threshold, the next reading is a new warning, so it opens the closed panel again.
+  dash.state.workspace = unreachableUpdaterWorkspace({ warning: true });
+  await dash.refresh();
+  await expect(page.locator('#glance-workspace')).toContainText('⚠ 1 warning');
+  await expect(page.locator('#glance-workspace')).toContainText("Auto-update can't reach GitHub");
+  await expectWorkspaceOpen(page, true);
+  await expect(row.locator('.warning')).toContainText("⚠ couldn't reach GitHub for 3h (since");
+  await expect(row).toContainText('journalctl --user -u ai-quota-dashboard-update');
+  await expectNoSideScroll(page);
 });
 
 test('workspace: the Show/Hide details choice survives a reload through localStorage', async ({ page, dash }) => {
