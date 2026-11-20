@@ -88,6 +88,10 @@
   .fresh { margin-left: auto; font-size: 12px; color: var(--ink-muted); white-space: nowrap; }
   .fresh.stale { color: var(--warning-ink); }
   .card-error { color: var(--ink-2); font-size: 13px; padding: 12px 0; }
+  .card-limits { color: var(--ink-2); font-size: 12.5px; padding: 10px 0 2px; overflow-wrap: anywhere; }
+  .card-limits strong { color: var(--ink-1); font-variant-numeric: tabular-nums; }
+  .card-limits .warning { color: var(--warning-ink); }
+  .card-limits .critical { color: var(--critical-ink); }
   .card-note { color: var(--ink-muted); font-size: 12.5px; padding: 10px 0 12px; overflow-wrap: anywhere; }
   .card-error code, .empty code { font-size: 12px; background: var(--hairline); padding: 1px 5px; border-radius: 4px; }
 
@@ -1151,7 +1155,73 @@
   // A reading shown after a failed update, or one too old to trust, says how old it is.
   const glanceAge = (at, failed) => glanceNote(`${failed ? "⚠ Couldn't refresh · " : ''}◷ ${at != null ? ago(at) : 'time unknown'}`, 'warning');
 
-  // One line per account: its tightest known window. Accounts are never summed or compared with each other.
+  // ---------- limits: each account's binding window within each scope ----------
+  // A window's `scope` is null when it limits the whole account, else the model, family or feature it alone limits.
+  // A reading saved before the API had `scope` gets one from its label: the first part that isn't a cadence
+  // ("Weekly · Opus" → Opus, "Gemini · Weekly" → Gemini, "5-hour" → the whole account).
+  const CADENCE = /^(\d+-(min|hour|day)|weekly|monthly|daily|quota|reported quota)$/i;
+  function scopeOf(w) {
+    if (w.scope === null || (typeof w.scope === 'string' && w.scope.trim())) return w.scope;
+    return String(w.label ?? '').split(' · ').map((s) => s.trim()).find((s) => s && !CADENCE.test(s)) ?? null;
+  }
+  // The window's label without its scope, so a scope line reads "Gemini: Weekly …", not "Gemini: Gemini · Weekly …".
+  const labelIn = (w, scope) => String(w.label ?? '').split(' · ').filter((s) => s.trim() !== scope).join(' · ');
+
+  // Groups the account's windows by scope and picks each group's limiter: the window with the least `left` among
+  // those with a current figure. Reset-due windows are never a limiter, only counted as pending. Account-wide
+  // windows bind every named scope too, so a named scope is shown only when its limiter is tighter than the
+  // account-wide one (or the account-wide one has no current figure). With no account-wide window, every scope shows.
+  // Scopes are only ever compared within one account.
+  function limits(a, now) {
+    const groups = new Map();
+    for (const w of a.windows || []) {
+      const scope = scopeOf(w);
+      if (!groups.has(scope)) groups.set(scope, { scope, limiter: null, pending: 0 });
+      const g = groups.get(scope), v = view(w, now);
+      if (v.resetPassed) g.pending++;
+      else if (v.left != null && (!g.limiter || v.left < g.limiter.v.left)) g.limiter = { w, v };
+    }
+    const wide = groups.get(null) ?? null;
+    groups.delete(null);
+    const named = [...groups.values()];
+    const bound = wide?.limiter?.v.left;
+    const scopes = named.filter((g) => (bound == null ? true : g.limiter != null && g.limiter.v.left < bound));
+    // Tightest first; then reset-due, then can't tell, each in the order the provider listed them.
+    const rank = (g) => (g.limiter ? 0 : g.pending ? 1 : 2);
+    scopes.sort((x, y) => rank(x) - rank(y) || (x.limiter && y.limiter ? x.limiter.v.left - y.limiter.v.left : 0));
+    const hiddenPending = named.filter((g) => !scopes.includes(g)).reduce((n, g) => n + g.pending, 0);
+    return { wide, scopes, hiddenPending };
+  }
+
+  // One group's figure: "<label> N% left · resets in … ⚠ Low", reset-due, or can't tell. Never 0% or 100% for unknowns.
+  function limitText(g, label, extraPending = 0, sep = ' ') {
+    const pending = g.pending + extraPending;
+    if (!g.limiter) return g.pending ? `<strong>${RESET_DUE}</strong>` : "<strong>—</strong> can't tell";
+    const { w, v } = g.limiter, st = statusLabel(v);
+    const when = v.notStarted || v.toReset == null ? resetText(w, v) : `resets in ${fmtDur(v.toReset)}`;
+    const note = pending ? ` · ${plural(pending, 'reset', 'resets')} awaiting confirmation` : '';
+    return `${label ? `${esc(label)}${sep}` : ''}<strong>${pctText(v.left)}</strong> left${when ? ` · ${esc(when)}` : ''}${note}${st ? ` <span class="${st.cls}">${st.text}</span>` : ''}`;
+  }
+
+  // The lines the Capacity tile and the card share: the account-wide limiter first (when the account has one),
+  // then one line per shown scope. `max` caps the scope lines and adds "+N more".
+  function limitLines(a, now, max = Infinity) {
+    const { wide, scopes, hiddenPending } = limits(a, now);
+    const lines = [];
+    if (!wide && !scopes.length) {
+      lines.push(`<strong>—</strong> ${a.windows?.length ? 'Usage unknown' : a.error ? "Couldn't read usage" : 'No limits reported'}`);
+    } else if (wide) {
+      lines.push(wide.limiter ? `Limited by ${limitText(wide, wide.limiter.w.label, hiddenPending, ' · ')}`
+        : wide.pending ? `<strong>${RESET_DUE}</strong>` : '<strong>—</strong> Usage unknown');
+    }
+    for (const g of scopes.slice(0, max)) lines.push(`${esc(g.scope)}: ${limitText(g, g.limiter ? labelIn(g.limiter.w, g.scope) : '')}`);
+    if (scopes.length > max) lines.push(`+${scopes.length - max} more`);
+    return lines;
+  }
+
+  // One row per account: its account-wide limiter and any tighter scope, each on its own line.
+  // Accounts are never summed or compared with each other.
+  const GLANCE_SCOPES = 3;
   function renderCapacityGlance() {
     const now = Date.now();
     const failed = quotaError ? glanceNote("⚠ Couldn't refresh", 'warning') : '';
@@ -1160,24 +1230,12 @@
       return;
     }
     const rows = data.accounts.map((a) => {
-      const views = (a.windows || []).map((w) => ({ w, v: view(w, now) }));
-      // A reset-due window has no current figure, so it never counts as known capacity: it's only noted.
-      const known = views.filter(({ v }) => v.left != null);
-      const pending = views.filter(({ v }) => v.resetPassed).length;
-      const tight = known.reduce((min, x) => (!min || x.v.left < min.v.left ? x : min), null);
-      let what;
-      if (!tight && pending) what = `<strong>${RESET_DUE}</strong>`;
-      else if (!tight) what = `<strong>—</strong> ${a.windows?.length ? 'Usage unknown' : a.error ? "Couldn't read usage" : 'No limits reported'}`;
-      else {
-        const { w, v } = tight, st = statusLabel(v);
-        const when = v.notStarted || v.toReset == null ? resetText(w, v) : `resets in ${fmtDur(v.toReset)}`;
-        const note = pending ? ` · ${plural(pending, 'reset', 'resets')} awaiting confirmation` : '';
-        what = `${esc(w.label)} <strong>${pctText(v.left)}</strong> left${when ? ` · ${esc(when)}` : ''}${note}${st ? ` <span class="${st.cls}">${st.text}</span>` : ''}`;
-      }
+      const lines = limitLines(a, now, GLANCE_SCOPES);
       // The same reading age the card shows instead of ● Live.
       const age = shownAge(a);
+      if (age != null) lines[0] += ` <span class="warning">◷ ${esc(ago(age))}</span>`;
       return `<li class="glance-row"><div class="glance-who"><strong>${esc(a.name)}${a.plan ? ` ${esc(a.plan)}` : ''}</strong>${a.email ? ` · ${esc(a.email)}` : ''}</div>
-        <div class="glance-what">${what}${age != null ? ` <span class="warning">◷ ${esc(ago(age))}</span>` : ''}</div></li>`;
+        ${lines.map((l) => `<div class="glance-what">${l}</div>`).join('')}</li>`;
     });
     $('glance-capacity').innerHTML = rows.length ? `<ul class="glance-list">${rows.join('')}</ul>${failed}` : `${glanceNote('No Claude, ChatGPT or Antigravity logins found')}${failed}`;
   }
@@ -1360,6 +1418,8 @@
       ? '<div class="card-note">No 5-hour limit reported by Anthropic for this account</div>'
       : '';
     const err = a.error ? `<div class="card-error">${a.stale ? 'Showing the last reading. ' : ''}${md(a.error)}</div>` : '';
+    // The same limits the Capacity tile names, with every shown scope, so the phone view and the card agree.
+    const limitsLine = a.windows?.length ? `<div class="card-limits">${limitLines(a, now).map((l) => `<div>${l}</div>`).join('')}</div>` : '';
     return `
       <article class="card">
         <header class="card-head">
@@ -1370,7 +1430,7 @@
           </div>
           ${fresh}
         </header>
-        ${a.stale ? err : ''}${body}${note}${a.stale ? '' : err}
+        ${limitsLine}${a.stale ? err : ''}${body}${note}${a.stale ? '' : err}
       </article>`;
   }
 
