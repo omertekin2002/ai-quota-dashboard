@@ -61,6 +61,20 @@ test('missing hardware and unavailable commands stay unknown rather than healthy
   assert.ok(result.services.every((s) => s.state === 'unknown'));
 });
 
+test('/api/workspace serves the trimmed history view with its totals and span', async (t) => {
+  const options = await fixture(t), historyFile = path.join(await mkdtemp(path.join(os.tmpdir(), 'quota-workspace-history-')), 'history.json');
+  t.after(() => rm(path.dirname(historyFile), { recursive: true, force: true }));
+  const now = 1_800_000_000_000;
+  // 40 one-off service restarts over the last day, from a history saved by this build.
+  const events = Array.from({ length: 40 }, (_, i) => ({ id: `${now - (i + 1) * 30 * 60_000}:t3code.service:T3 Code restarted`, timestamp: now - (i + 1) * 30 * 60_000, level: 'warning', title: 'T3 Code restarted' }));
+  await writeFile(historyFile, JSON.stringify({ version: 1, events, samples: [], previous: null, lastSuccessAt: null, startedAt: now - 2 * 86400_000, droppedAt: null }));
+  const { history } = await createWorkspaceMonitor({ ...options, historyFile, now: () => now })();
+  assert.equal(history.events.length, 20);
+  assert.equal(history.eventCount, 41); // plus the monitoring-started marker
+  assert.deepEqual([history.episodes.length, history.episodeCount], [20, 40]);
+  assert.deepEqual([history.oldestAt, history.trimmed, history.eventLimit], [now - 2 * 86400_000, false, 1000]);
+});
+
 test('reports stopped, failed, missing, and starting services distinctly from running', async (t) => {
   const options = await fixture(t);
   const states = {

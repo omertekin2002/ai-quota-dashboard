@@ -9,7 +9,23 @@ export function memoryLevel(snapshot) {
   return snapshot.memory || pressure ? 'healthy' : 'unknown';
 }
 
-export const MAX_EVENTS = 100, MAX_ROUTINE_EVENTS = 20, EVENT_RETENTION_MS = 7 * 86400_000;
+// Seven days of incident events on this machine. Live, after #47, #52 and #54 grouped process churn, memory
+// flips and per-reading link drops, it still records about 90 a day (2026-11-19: 38 events in 10 hours; the
+// 100-event history then covered only 31 hours). Seven days at that rate is about 630; 1000 leaves room for an
+// average of about 140 a day, so a bad day or two still fit. Routine agent activity has its own budget below.
+export const MAX_EVENTS = 1000, MAX_ROUTINE_EVENTS = 20, EVENT_RETENTION_MS = 7 * 86400_000;
+
+// The cap of builds before MAX_EVENTS was raised. A file from one of them holding this many incident events
+// had dropped older ones to stay within it.
+const LEGACY_MAX_EVENTS = 100;
+
+// /api/workspace is polled every 30 seconds from a phone, so it serves only the newest events and episodes the
+// page renders (10 of each), with room to spare, plus the true totals. Every active episode is always served.
+export const API_EVENTS = 20, API_EPISODES = 20;
+
+// The history file holds every event, so it is rewritten only when the events change, and at least this often
+// so it never falls far behind. Each reading's state and latency samples go to a small companion file.
+export const FULL_WRITE_MS = 10 * 60_000;
 
 // Memory pressure counts as recovered only after readings have stayed healthy this long. On a busy machine
 // the level flips every 30 seconds to 2 minutes, and each flip would otherwise be its own incident.
@@ -57,12 +73,74 @@ function isProcessChurn(event) {
 // Keeps seven days, newest first. Routine agent activity gets its own small budget and only
 // fills room the other events leave, so it never pushes out an incident.
 export function pruneEvents(events, now) {
+  return pruneWithDrops(events, now).events;
+}
+
+// pruneEvents(), plus `droppedAt`: the newest event younger than seven days that the MAX_EVENTS cap dropped,
+// or null if it dropped none. Routine activity dropped from its own budget does not count.
+function pruneWithDrops(events, now) {
   const recent = events
     .filter((e) => e && Number.isFinite(e.timestamp) && e.timestamp >= now - EVENT_RETENTION_MS && e.timestamp <= now && !isProcessChurn(e))
     .sort((a, b) => b.timestamp - a.timestamp);
-  const main = recent.filter((e) => !isRoutineEvent(e)).slice(0, MAX_EVENTS);
+  const incidents = recent.filter((e) => !isRoutineEvent(e)), main = incidents.slice(0, MAX_EVENTS);
   const routine = recent.filter(isRoutineEvent).slice(0, Math.min(MAX_ROUTINE_EVENTS, MAX_EVENTS - main.length));
-  return [...main, ...routine].sort((a, b) => b.timestamp - a.timestamp);
+  return { events: [...main, ...routine].sort((a, b) => b.timestamp - a.timestamp), droppedAt: incidents[MAX_EVENTS]?.timestamp ?? null };
+}
+
+/**
+ * How far back the kept history goes. `oldestAt` is the start of the span the history is complete for: when
+ * monitoring started, or seven days ago, whichever is later. If the MAX_EVENTS cap dropped an event from the
+ * last seven days (`droppedAt`), the span starts at the oldest kept incident event instead and `trimmed` is true.
+ */
+export function historySpan({ events, startedAt, droppedAt }, now) {
+  const trimmed = Number.isFinite(droppedAt) && droppedAt >= now - EVENT_RETENTION_MS;
+  const incidents = events.filter((e) => !isRoutineEvent(e));
+  const oldestAt = trimmed && incidents.length ? incidents.at(-1).timestamp : Math.max(startedAt ?? now, now - EVENT_RETENTION_MS);
+  return { oldestAt, trimmed };
+}
+
+/**
+ * What /api/workspace serves from a record() result: the newest API_EVENTS events with `eventCount`, and every
+ * active episode plus the newest others up to API_EPISODES in all, with `episodeCount`. Episodes are paired
+ * from the full history before this, so trimming the response changes no episode. `eventLimit` is MAX_EVENTS,
+ * for saying what the cap is when it dropped older events.
+ */
+export function historyForApi(history) {
+  const active = history.episodes.filter((e) => e.state === 'active').length;
+  return {
+    ...history,
+    events: history.events.slice(0, API_EVENTS), eventCount: history.events.length, eventLimit: MAX_EVENTS,
+    episodes: history.episodes.slice(0, Math.max(API_EPISODES, active)), episodeCount: history.episodes.length,
+  };
+}
+
+// The companion file holding each reading's state between full writes.
+export const stateFileOf = (file) => `${file.replace(/\.json$/, '')}.state.json`;
+
+/**
+ * Reads a saved history: the full file, with the companion file's `previous` and `samples` when they are from a
+ * later reading. A file without a reading time (from an older build) is trusted over any companion file.
+ * Returns null when there is no readable version-1 history.
+ */
+export async function readHistoryFile(file) {
+  const read = (name) => readFile(name, 'utf8').then(JSON.parse).catch(() => null);
+  const stored = await read(file);
+  if (stored?.version !== 1) return null;
+  const state = await read(stateFileOf(file));
+  const newer = state?.version === 1 && Number.isFinite(state.previous?.readAt) && state.previous.readAt > (stored.previous?.readAt ?? Infinity);
+  return newer ? { ...stored, previous: state.previous, samples: state.samples } : stored;
+}
+
+async function writeAtomic(file, text) {
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(`${file}.tmp`, text, { mode: 0o600 });
+    await rename(`${file}.tmp`, file);
+    return true;
+  } catch {
+    await unlink(`${file}.tmp`).catch(() => {});
+    return false;
+  }
 }
 
 const LEVEL_RANK = { info: 0, warning: 1, critical: 2 };
@@ -177,22 +255,26 @@ export function incidentEpisodes(events, now) {
 }
 
 export function createWorkspaceHistory({ file = null } = {}) {
-  let loaded = false, resumed = false, events = [], samples = [], previous = null, lastSuccessAt = null, startedAt = null;
+  let loaded = false, resumed = false, events = [], samples = [], previous = null, lastSuccessAt = null, startedAt = null, droppedAt = null;
+  // The events as last written to the full file, and when; null until this process has written it.
+  let writtenEvents = null, writtenAt = null;
   return async function record(snapshot) {
     if (!loaded) {
       loaded = true;
-      if (file) {
-        try {
-          const stored = JSON.parse(await readFile(file, 'utf8'));
-          if (stored.version === 1) {
-            events = Array.isArray(stored.events) ? stored.events : [];
-            samples = Array.isArray(stored.samples) ? stored.samples : [];
-            previous = stored.previous || null;
-            resumed = previous != null;
-            lastSuccessAt = stored.lastSuccessAt || null;
-            startedAt = stored.startedAt || null;
-          }
-        } catch {}
+      const stored = file ? await readHistoryFile(file) : null;
+      if (stored) {
+        events = Array.isArray(stored.events) ? stored.events : [];
+        samples = Array.isArray(stored.samples) ? stored.samples : [];
+        previous = stored.previous || null;
+        resumed = previous != null;
+        lastSuccessAt = stored.lastSuccessAt || null;
+        startedAt = stored.startedAt || null;
+        if (Object.hasOwn(stored, 'droppedAt')) droppedAt = Number.isFinite(stored.droppedAt) ? stored.droppedAt : null;
+        else {
+          // Older builds kept no record of what their cap dropped; one full at its cap had dropped older events.
+          const incidents = events.filter((e) => e && Number.isFinite(e.timestamp) && !isRoutineEvent(e)).map((e) => e.timestamp);
+          if (incidents.length >= LEGACY_MAX_EVENTS) droppedAt = Math.min(...incidents) - 1;
+        }
       }
     }
     const now = snapshot.generatedAt;
@@ -362,21 +444,23 @@ export function createWorkspaceHistory({ file = null } = {}) {
     // One sample per 25 seconds, regardless of how often visitors press Refresh.
     if (!samples.length || now - samples.at(-1).timestamp >= 25_000) samples.push({ timestamp: now, state: snapshot.internet.state, latencyMs: snapshot.internet.latencyMs });
     samples = samples.filter((s) => s.timestamp >= now - 30 * 60_000 && s.timestamp <= now).slice(-80);
-    events = pruneEvents(events, now);
+    const pruned = pruneWithDrops(events, now);
+    events = pruned.events;
+    if (pruned.droppedAt != null) droppedAt = Math.max(droppedAt ?? -Infinity, pruned.droppedAt);
     previous = current;
     resumed = false;
     let persisted = null;
     if (file) {
-      try {
-        await mkdir(path.dirname(file), { recursive: true });
-        await writeFile(`${file}.tmp`, JSON.stringify({ version: 1, events, samples, previous, lastSuccessAt, startedAt }), { mode: 0o600 });
-        await rename(`${file}.tmp`, file);
-        persisted = true;
-      } catch {
-        persisted = false;
-        await unlink(`${file}.tmp`).catch(() => {});
-      }
+      // A full write carries everything, so an older build can still read the file. Between full writes, only
+      // the reading's state and samples change, and they go to the companion file. A failed full write is retried
+      // on the next reading, and until one works the companion file is not written either, so the saved state
+      // never gets ahead of the saved events: after a restart, the changes are compared and recorded again.
+      const eventsJson = JSON.stringify(events);
+      if (eventsJson !== writtenEvents || now - writtenAt >= FULL_WRITE_MS || now < writtenAt) {
+        persisted = await writeAtomic(file, `{"version":1,"events":${eventsJson},${JSON.stringify({ samples, previous, lastSuccessAt, startedAt, droppedAt }).slice(1)}`);
+        if (persisted) [writtenEvents, writtenAt] = [eventsJson, now];
+      } else persisted = await writeAtomic(stateFileOf(file), JSON.stringify({ version: 1, samples, previous }));
     }
-    return { events: [...events], episodes: incidentEpisodes(events, now), samples: [...samples], lastSuccessAt, startedAt, persisted };
+    return { events: [...events], episodes: incidentEpisodes(events, now), samples: [...samples], lastSuccessAt, startedAt, persisted, ...historySpan({ events, startedAt, droppedAt }, now) };
   };
 }

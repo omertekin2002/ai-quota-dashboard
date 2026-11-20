@@ -1037,6 +1037,43 @@ test('the Incidents card shows active, recovered and one-off episodes in text, e
   assert.ok(page.element('workspace-diagnostics').innerHTML.includes('<h3>Recent events</h3>'));
 });
 
+test('Recent events says how far back the history goes, and Incidents counts every retained incident', async () => {
+  const now = Date.UTC(2026, 10, 20, 0, 0), MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
+  const episodes = Array.from({ length: 20 }, (_, i) => ({ key: 'link', title: `Link drop ${i}`, level: 'warning', startedAt: now - i * MIN, endedAt: now - i * MIN, state: 'once', eventCount: 1, caveats: [] }));
+  const fixture = {
+    generatedAt: now, supported: true, model: 'HP laptop', uptimeSec: 10000, power: { acOnline: true, batteries: [] }, temperatures: [],
+    memory: { usedPct: 50, usedBytes: 1024 ** 3, totalBytes: 2 * 1024 ** 3 }, internet: { state: 'online', latencyMs: 50 }, services: [],
+    diagnostics: { memoryLevel: 'healthy', pressure: { cpu: null, memory: null, io: null }, topProcesses: [], disks: [],
+      backup: { state: 'success', lastSuccessAt: now - MIN, scheduleActive: true }, tailscale: { state: 'running', connections: [] }, healthChecks: [] },
+    history: { events: [], samples: [], persisted: true, episodes, episodeCount: 314, eventCount: 632, eventLimit: 1000, oldestAt: now - DAY - 7 * HOUR, trimmed: false },
+  };
+  const page = await loadDashboard({ now, workspace: fixture, hidden: (id) => id === 'workspace-diagnostics' });
+  const text = () => unescapeHtml(page.element('workspace-diagnostics').innerHTML.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ');
+  const footer = () => text().slice(text().indexOf('Recent events'));
+  // The server sends the newest 20 incidents; the total is the real one.
+  assert.ok(text().includes('Showing 10 of 314 incidents.'), text());
+  assert.ok(!text().includes('Link drop 10'));
+  // A history younger than seven days says when it starts and how long that is.
+  assert.match(footer(), /History since [^()]+ \(1d 7h\) · kept for up to seven days\./);
+  assert.ok(!footer().includes('retained for seven days'));
+  // Older events dropped at the cap are named, with the cap.
+  page.run('workspace.history.trimmed = true; workspace.history.oldestAt = ' + (now - 31 * HOUR) + '; renderWorkspace();');
+  assert.match(footer(), /History since [^()]+ \(1d 7h\) · older events dropped to stay within 1000 events\./);
+  // Seven days covered.
+  page.run('workspace.history.trimmed = false; workspace.history.oldestAt = ' + (now - 7 * DAY) + '; renderWorkspace();');
+  assert.ok(footer().includes('History covers the last seven days.'));
+  // A save failure is still shown, after the span.
+  page.run('workspace.history.persisted = false; renderWorkspace();');
+  assert.ok(footer().includes('History covers the last seven days. History could not be saved.'));
+  // An older server: no span and no totals. The page still renders, counting what it was sent.
+  page.run('workspace.history.persisted = true; delete workspace.history.oldestAt; delete workspace.history.trimmed; delete workspace.history.episodeCount; delete workspace.history.eventLimit; renderWorkspace();');
+  assert.ok(footer().includes('History is kept for up to seven days.'));
+  assert.ok(text().includes('Showing 10 of 20 incidents.'));
+  // A trimmed span from a server that did not send its limit still reads.
+  page.run('workspace.history.trimmed = true; workspace.history.oldestAt = ' + (now - 2 * HOUR) + '; renderWorkspace();');
+  assert.ok(footer().includes('(2h) · older events dropped to stay within the event limit.'));
+});
+
 test('an incident opens to its recorded events by click, Enter or Space, closes by Escape, and stays open across a refresh', async () => {
   const now = Date.UTC(2026, 10, 17, 12, 0), MIN = 60_000;
   const memoryEvents = [
