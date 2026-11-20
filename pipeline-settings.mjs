@@ -9,7 +9,7 @@ import { command } from './workspace.mjs';
 const TIMEOUT_MS = 20_000;
 
 // Names the page may change. agentctl knows the ranges; these are checked here too so nothing else reaches it.
-export const SETTINGS = { maxPlansPerDay: { min: 0, max: 48 } };
+export const SETTINGS = { maxPlansPerDay: { min: 0, max: 100 } };
 
 export class SettingsInputError extends Error {}
 

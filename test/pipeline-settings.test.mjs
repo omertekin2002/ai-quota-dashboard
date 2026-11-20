@@ -7,7 +7,7 @@ import { createPipelineSettings, SettingsInputError } from '../pipeline-settings
 
 const VIEW = (value = 12) => ({
   version: 1, day: '2026-11-20', plansToday: 3,
-  settings: { maxPlansPerDay: { value, configValue: 12, overridden: value !== 12, min: 0, max: 48, describe: 'plans' } },
+  settings: { maxPlansPerDay: { value, configValue: 12, overridden: value !== 12, min: 0, max: 100, describe: 'plans' } },
 });
 
 // A fake agentctl: records its arguments and answers like the real one.
@@ -32,7 +32,7 @@ test('settings are read and changed through agentctl, with arguments only (no sh
 test('bad values and unknown names never reach agentctl', async () => {
   const calls = [];
   const s = createPipelineSettings({ run: fakeRun(calls) });
-  for (const body of [null, [], {}, { maxPlansPerDay: -1 }, { maxPlansPerDay: 49 }, { maxPlansPerDay: 2.5 }, { maxPlansPerDay: '6' },
+  for (const body of [null, [], {}, { maxPlansPerDay: -1 }, { maxPlansPerDay: 101 }, { maxPlansPerDay: 2.5 }, { maxPlansPerDay: '6' },
     { maxWorkers: 3 }, { maxPlansPerDay: 6, maxWorkers: 3 }, { __proto__: { maxPlansPerDay: 6 } }]) {
     await assert.rejects(s.set(body), SettingsInputError, JSON.stringify(body));
   }

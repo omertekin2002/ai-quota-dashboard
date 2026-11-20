@@ -1805,7 +1805,7 @@ test('the collapsed pipeline summary escapes problem text and never shows readin
 // ---------- Plans per day (the pipeline's owner settings) ----------
 const settingsOf = (value = 12, plansToday = 3, configValue = 12) => ({
   version: 1, day: '2026-11-20', plansToday,
-  settings: { maxPlansPerDay: { value, configValue, overridden: value !== configValue, min: 0, max: 48, describe: 'plans' } },
+  settings: { maxPlansPerDay: { value, configValue, overridden: value !== configValue, min: 0, max: 100, describe: 'plans' } },
 });
 
 test('Plans per day shows the cap and today’s count, saves a new cap as JSON, and refuses bad numbers without a request', async () => {
@@ -1828,9 +1828,9 @@ test('Plans per day shows the cap and today’s count, saves a new cap as JSON, 
     await element('plans-form').onsubmit({ preventDefault() {} });
     await settle();
   };
-  for (const bad of ['', '-1', '49', '2.5']) {
+  for (const bad of ['', '-1', '101', '2.5']) {
     await submit(bad);
-    assert.match(element('plans-status').textContent, /^Enter a whole number from 0 to 48/, bad);
+    assert.match(element('plans-status').textContent, /^Enter a whole number from 0 to 100/, bad);
   }
   assert.equal(posts.length, 0);
 
@@ -1858,11 +1858,11 @@ test('Plans per day says when it can’t read or save the setting', async () => 
 
   const page = await glancePage({
     settings: settingsOf(),
-    respond: (url, init) => (init?.method === 'POST' ? { ok: false, status: 400, json: async () => ({ error: 'maxPlansPerDay must be a whole number from 0 to 48' }) } : undefined),
+    respond: (url, init) => (init?.method === 'POST' ? { ok: false, status: 400, json: async () => ({ error: 'maxPlansPerDay must be a whole number from 0 to 100' }) } : undefined),
   });
   page.element('plans-per-day').value = '7';
   await page.element('plans-form').onsubmit({ preventDefault() {} });
-  assert.match(page.element('plans-status').textContent, /^Not saved \(maxPlansPerDay must be a whole number from 0 to 48\)/);
+  assert.match(page.element('plans-status').textContent, /^Not saved \(maxPlansPerDay must be a whole number from 0 to 100\)/);
   assert.equal(page.element('plans-per-day').disabled, false);
 });
 

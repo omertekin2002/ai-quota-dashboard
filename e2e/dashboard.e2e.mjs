@@ -134,7 +134,7 @@ const test = base.extend({
           if (args[0] === 'set') state.maxPlansPerDay = Number(args[2]);
           const value = state.maxPlansPerDay;
           return JSON.stringify({ version: 1, day: new Date().toISOString().slice(0, 10), plansToday: state.plansToday,
-            settings: { maxPlansPerDay: { value, configValue: 12, overridden: value !== 12, min: 0, max: 48, describe: 'plans' } } });
+            settings: { maxPlansPerDay: { value, configValue: 12, overridden: value !== 12, min: 0, max: 100, describe: 'plans' } } });
         },
       }),
       log: (...args) => logged.push(args.map(String).join(' ')),
@@ -716,9 +716,9 @@ test('Plans per day: change the cap with the keyboard, see it saved and counted,
   await expectNoSideScroll(page);
 
   // Out of range: refused in the page, nothing sent to agentctl.
-  await input.fill('60');
+  await input.fill('150');
   await input.press('Enter');
-  await expect(status).toContainText('Enter a whole number from 0 to 48');
+  await expect(status).toContainText('Enter a whole number from 0 to 100');
   expect(dash.calls.agentctl.filter((a) => a[0] === 'set')).toEqual([]);
 
   await input.fill('5');
