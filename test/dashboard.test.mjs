@@ -767,6 +767,19 @@ test('the Workspace panel shows the auto-update row in every state, with text wa
   assert.ok(stopped.includes('⚠ timer stopped'), stopped);
   assert.ok(!stopped.includes('next '));
 
+  // A run that couldn't reach GitHub is a quiet row within the 2-hour threshold, and a warning past it.
+  const unreachable = { ...base, state: 'unreachable', lastExitStatus: 1, lastOkAt: now - 30 * 60_000, unreachableSince: now - 15 * 60_000, unreachableForMs: 15 * 60_000, unreachableWarning: false };
+  const quiet = row(unreachable);
+  assert.ok(quiet.includes(`Auto-update: couldn't reach GitHub at ${clock(base.lastRunAt)} · last updated ${clock(unreachable.lastOkAt)} · next ${clock(base.nextRunAt)}</p>`), quiet);
+  assert.ok(!quiet.includes('⚠') && !quiet.includes('warning') && !quiet.includes('journalctl'), quiet);
+  const since = now - 3 * 3600_000;
+  const long = row({ ...unreachable, unreachableSince: since, unreachableForMs: 3 * 3600_000, unreachableWarning: true });
+  assert.ok(long.includes(`<span class="warning">⚠ couldn't reach GitHub for 3h (since ${clock(since)})</span> · last updated ${clock(unreachable.lastOkAt)} · next ${clock(base.nextRunAt)}`), long);
+  assert.ok(long.includes('<code>journalctl --user -u ai-quota-dashboard-update</code>'), long);
+  // Without a recorded successful run there is no "last updated".
+  assert.ok(!row({ ...unreachable, lastOkAt: null }).includes('last updated'));
+  assert.ok(!row({ ...unreachable, unreachableWarning: true, unreachableForMs: '<img src=x>', unreachableSince: '<b>' }).includes('<img'));
+
   assert.ok(row({ ...base, state: 'running' }).includes(`running now · last run ${clock(base.lastRunAt)}`));
   assert.ok(row({ ...base, state: 'never-run', lastRunAt: null, lastExitStatus: null }).includes('no completed run recorded'));
   const missing = row({ state: 'not-installed', timerActive: null, lastRunAt: null, lastExitStatus: null, nextRunAt: null });
@@ -1333,6 +1346,7 @@ test('At a glance: workspace conditions come from the same rules as the panels�
     ['workspace.diagnostics.backup.lastSuccessAt = Date.now() - 40 * 3600_000', 'warning', 'No successful T7 backup in 36h', 'diagnostic-status warning'],
     ['workspace.diagnostics.backup.scheduleActive = false', 'warning', 'T7 backup schedule inactive', 'diagnostic-status warning'],
     ['workspace.autoUpdate.timerActive = false', 'warning', 'Auto-update timer stopped', 'class="warning">⚠ timer stopped'],
+    ['Object.assign(workspace.autoUpdate, { state: "unreachable", lastExitStatus: 1, unreachableWarning: true, unreachableForMs: 3 * 3600_000, unreachableSince: Date.now() - 3 * 3600_000 })', 'warning', "Auto-update can't reach GitHub", `class="warning">⚠ couldn't reach GitHub for 3h`],
   ];
   for (const [change, level, text, panelClass] of cases) {
     const p = await glancePage();
@@ -1434,6 +1448,7 @@ test('every warning or critical workspace condition opens the panel by default',
     'workspace.diagnostics.disks[0].usedPct = 96',
     'workspace.autoUpdate.state = "failed"',
     'workspace.autoUpdate.timerActive = false',
+    'Object.assign(workspace.autoUpdate, { state: "unreachable", lastExitStatus: 1, unreachableWarning: true, unreachableForMs: 3 * 3600_000, unreachableSince: Date.now() - 3 * 3600_000 })',
     'workspace.internet.state = "offline"',
     'workspace.diagnostics.backup.state = "failed"',
   ];
@@ -1445,6 +1460,18 @@ test('every warning or critical workspace condition opens the panel by default',
     assert.deepEqual(disclosure(page), OPEN, change);
     assert.ok(metaText(page).startsWith('HP laptop · up'), change);
   }
+});
+
+test('an updater that could not reach GitHub for less than two hours is no warning: the panel stays collapsed as All OK', async () => {
+  const workspace = healthyWorkspace();
+  Object.assign(workspace.autoUpdate, { state: 'unreachable', lastExitStatus: 1, unreachableWarning: false, unreachableForMs: 45 * 60_000, unreachableSince: Date.now() - 45 * 60_000 });
+  const page = await glancePage({ workspace });
+  assert.equal(page.run('JSON.stringify(workspaceConditions(workspace))'), '[]');
+  assert.deepEqual(disclosure(page), CLOSED);
+  assert.ok(tileText(page, 'workspace').includes('All OK'), tileText(page, 'workspace'));
+  // Past the threshold the same reading is a warning.
+  page.run('workspace.autoUpdate.unreachableWarning = true; renderWorkspace();');
+  assert.deepEqual(JSON.parse(page.run('JSON.stringify(workspaceConditions(workspace))')), [{ level: 'warning', text: "Auto-update can't reach GitHub" }]);
 });
 
 test('missing, failed, stale and unsupported readings never leave the panel collapsed without an explanation', async () => {

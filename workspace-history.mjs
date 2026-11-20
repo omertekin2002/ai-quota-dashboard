@@ -42,6 +42,10 @@ export const MAX_EPISODE_EVENTS = 20;
 // spanning it gets its caveat. Quicker restarts, such as an auto-update, miss a reading or two and record nothing.
 export const MONITOR_GAP_MS = 2 * 60_000;
 
+// How long the dashboard updater may keep failing to reach GitHub before it counts as a warning: 8 runs of its
+// 15-minute timer. Single DNS blips recover on the next run; a fetch that keeps failing past this is worth a look.
+export const UNREACHABLE_QUIET_MS = 2 * 3600_000;
+
 const STOPPED_STATES = ['Z', 'T', 't'];
 const isPressure = (level) => level === 'warning' || level === 'critical';
 // Older builds recorded each rise of the link-drop counter as its own event.
@@ -336,18 +340,43 @@ export function createWorkspaceHistory({ file = null } = {}) {
       }
     }
     const update = snapshot.autoUpdate;
+    let updateHistory = null;
     if (update) {
+      const before = previous?.autoUpdate;
       // A run in progress or an unreadable state keeps the last settled result, so neither fakes a change.
-      current.autoUpdate = {
-        result: ['ok', 'failed', 'never-run', 'not-installed'].includes(update.state) ? update.state : previous?.autoUpdate?.result,
-        timerActive: update.timerActive ?? previous?.autoUpdate?.timerActive,
+      const result = ['ok', 'failed', 'unreachable', 'never-run', 'not-installed'].includes(update.state) ? update.state : before?.result;
+      // `unreachableSince`: the first run of the current streak that couldn't reach GitHub. `unreachableReported`:
+      // the streak has passed UNREACHABLE_QUIET_MS and its warning is recorded. `alerted`: a warning is open, so
+      // the next successful run records a recovery. Files from older builds have none of these, and a recorded
+      // failure was the only open warning then.
+      const streak = result === 'unreachable' && before?.result === 'unreachable' && Number.isFinite(before.unreachableSince);
+      const after = current.autoUpdate = {
+        result,
+        timerActive: update.timerActive ?? before?.timerActive,
+        unreachableSince: result !== 'unreachable' ? null : streak ? before.unreachableSince : update.lastRunAt ?? now,
+        unreachableReported: streak ? before.unreachableReported === true : false,
+        lastOkAt: (update.state === 'ok' ? update.lastRunAt : null) ?? before?.lastOkAt ?? null,
+        alerted: before ? before.alerted ?? before.result === 'failed' : result === 'failed',
       };
-      const before = previous?.autoUpdate, after = current.autoUpdate;
+      const unreachableForMs = after.unreachableSince != null ? Math.max(0, now - after.unreachableSince) : null;
       if (before) {
-        if (after.result === 'failed' && before.result !== 'failed') add('auto-update', `Dashboard auto-update failed${update.lastExitStatus != null ? ` (exit ${update.lastExitStatus})` : ''}`, 'warning');
-        else if (after.result === 'ok' && before.result === 'failed') add('auto-update', 'Dashboard auto-update recovered');
+        if (result === 'failed' && before.result !== 'failed') {
+          add('auto-update', `Dashboard auto-update failed${update.lastExitStatus != null ? ` (exit ${update.lastExitStatus})` : ''}`, 'warning');
+          after.alerted = true;
+        } else if (result === 'unreachable' && !after.unreachableReported && unreachableForMs >= UNREACHABLE_QUIET_MS) {
+          add('auto-update', `Dashboard auto-update couldn't reach GitHub for ${Math.round(UNREACHABLE_QUIET_MS / 3600_000)} h`, 'warning');
+          Object.assign(after, { unreachableReported: true, alerted: true });
+        } else if (result === 'ok' && after.alerted) {
+          add('auto-update', 'Dashboard auto-update recovered');
+          after.alerted = false;
+        }
         if (typeof before.timerActive === 'boolean' && after.timerActive !== before.timerActive) add('auto-update-timer', after.timerActive ? 'Dashboard auto-update timer active' : 'Dashboard auto-update timer inactive', after.timerActive ? 'info' : 'warning');
       }
+      // What /api/workspace adds to `autoUpdate`, so the page needs no clock logic of its own.
+      updateHistory = {
+        unreachableSince: after.unreachableSince, lastOkAt: after.lastOkAt, unreachableForMs,
+        unreachableWarning: unreachableForMs != null && unreachableForMs >= UNREACHABLE_QUIET_MS,
+      };
     }
     if (!previous) add('monitor', 'Computer monitoring started');
     else {
@@ -461,6 +490,6 @@ export function createWorkspaceHistory({ file = null } = {}) {
         if (persisted) [writtenEvents, writtenAt] = [eventsJson, now];
       } else persisted = await writeAtomic(stateFileOf(file), JSON.stringify({ version: 1, samples, previous }));
     }
-    return { events: [...events], episodes: incidentEpisodes(events, now), samples: [...samples], lastSuccessAt, startedAt, persisted, ...historySpan({ events, startedAt, droppedAt }, now) };
+    return { events: [...events], episodes: incidentEpisodes(events, now), samples: [...samples], lastSuccessAt, startedAt, persisted, ...historySpan({ events, startedAt, droppedAt }, now), autoUpdate: updateHistory };
   };
 }
