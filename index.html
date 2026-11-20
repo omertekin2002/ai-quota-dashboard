@@ -685,10 +685,20 @@
       <article class="diagnostic-card"><h3>Storage & backup</h3>${disks}<div class="diagnostic-row"><span>T7 backup</span><span class="diagnostic-status ${backupLevel}">${esc(backupLabel)}</span></div><p class="diagnostic-detail">${esc(backupDetail)}</p></article>
       <article class="diagnostic-card"><h3>Connection quality</h3><div class="diagnostic-row"><span>Wi-Fi signal</span><span>${workspace.internet.signalPct != null ? `${workspace.internet.signalPct}%` : '—'}</span></div>
         <div class="diagnostic-row"><span>Wi-Fi link rate</span><span>${esc(workspace.internet.linkRate || '—')}</span></div><div class="diagnostic-row"><span>Tailscale</span><span>${esc(tailscale)}</span></div>${renderLatency(history?.samples || [])}<p class="diagnostic-detail">Link rate is the Wi-Fi connection rate. Internet timings are HTTPS response times from this laptop.</p></article>
-      ${renderIncidents(history?.episodes)}
-      <article class="diagnostic-card"><h3>Recent events</h3><ul class="diagnostic-list">${events || '<li class="diagnostic-detail">No recent events</li>'}</ul><p class="diagnostic-detail">Latest 10 events · sampled every 30 seconds, even with this page closed. ${history?.persisted === false ? 'History could not be saved.' : 'History is retained for seven days.'}</p></article>
+      ${renderIncidents(history?.episodes, history?.episodeCount)}
+      <article class="diagnostic-card"><h3>Recent events</h3><ul class="diagnostic-list">${events || '<li class="diagnostic-detail">No recent events</li>'}</ul><p class="diagnostic-detail">Latest 10 events · sampled every 30 seconds, even with this page closed. ${historySpanText(history)}${history?.persisted === false ? ' History could not be saved.' : ''}</p></article>
     </div>`;
     if (focused != null) [...target.querySelectorAll('.incident-toggle')].find((el) => el.dataset.incident === focused)?.focus({ preventScroll: true });
+  }
+
+  // How far back the kept history goes, from `oldestAt` and `trimmed` in /api/workspace.
+  function historySpanText(history) {
+    if (!Number.isFinite(history?.oldestAt)) return 'History is kept for up to seven days.'; // a server from before it reported its span
+    const span = (Date.now() - history.oldestAt) / 1000;
+    if (history.trimmed) return `History since ${esc(fmtFull(history.oldestAt))} (${esc(fmtDur(span))}) · older events dropped to stay within ${Number.isFinite(history.eventLimit) ? `${history.eventLimit} events` : 'the event limit'}.`;
+    // A minute's slack, as the page renders a little after the server read the span.
+    if (span >= 7 * 86400 - 60) return 'History covers the last seven days.';
+    return `History since ${esc(fmtFull(history.oldestAt))} (${esc(fmtDur(span))}) · kept for up to seven days.`;
   }
 
   // Identifies an episode across refreshes: its condition and when it started (null once the start is pruned).
@@ -711,7 +721,7 @@
   }
 
   // Episodes built by incidentEpisodes() in workspace-history.mjs: active ones first, then the newest.
-  function renderIncidents(episodes) {
+  function renderIncidents(episodes, episodeCount) {
     if (!Array.isArray(episodes)) return ''; // a server from before /api/workspace reported them
     const shown = episodes.slice(0, 10);
     const live = new Set(episodes.map(incidentKey));
@@ -734,7 +744,9 @@
       return `${rowStart}<div class="event-title incident-toggle" role="button" tabindex="0" aria-expanded="${open}" aria-controls="${id}" data-incident="${esc(key)}">${summary}<span class="incident-more" aria-hidden="true">${open ? '▾ Hide' : '▸ Show'} ${count} recorded events</span></div>`
         + `<ol class="incident-events" id="${id}" aria-label="Recorded events, oldest first"${open ? '' : ' hidden'}>${open ? incidentEventsHtml(e) : ''}</ol></li>`;
     }).join('');
-    const more = episodes.length > shown.length ? `Showing ${shown.length} of ${episodes.length} incidents. ` : '';
+    // The server sends only the newest episodes; `episodeCount` is the true total (older servers send them all).
+    const total = Number.isFinite(episodeCount) ? Math.max(episodeCount, episodes.length) : episodes.length;
+    const more = total > shown.length ? `Showing ${shown.length} of ${total} incidents. ` : '';
     return `<article class="diagnostic-card incidents-card"><h3>Incidents</h3><ul class="diagnostic-list">${rows || '<li class="diagnostic-detail">No incidents in the last seven days</li>'}</ul><p class="diagnostic-detail">${more}A failure and its recovery form one incident. Readings are sampled every 30 seconds, so durations are approximate and brief changes can fall between readings.</p></article>`;
   }
 
