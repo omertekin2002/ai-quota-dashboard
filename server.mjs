@@ -17,15 +17,43 @@ import { parseAllowedHosts, isAllowedHost } from './hosts.mjs';
 import { getWorkspaceStatus, startWorkspaceMonitoring } from './workspace.mjs';
 import { getPipelineOverview, startPipelineOverview } from './pipeline-overview.mjs';
 import { createVersionMonitor, startVersionMonitoring } from './version.mjs';
+import { pipelineSettings, SettingsInputError } from './pipeline-settings.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 const UNKNOWN_VERSION = { commit: null, startedAt: null, restartNeeded: false, behindUpstream: false };
+const MAX_BODY_BYTES = 4096;
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+// The only request that changes anything. A page on another site could still POST here from the owner's browser
+// (the Host header is ours then), so writes also need a JSON body, which a plain form can't send, and an Origin
+// header naming one of our hosts.
+async function readJsonBody(req, allowedHosts) {
+  let origin = null;
+  try { origin = new URL(req.headers.origin).host; } catch {}
+  if (!origin || !isAllowedHost(origin, allowedHosts)) throw new HttpError(403, 'cross-origin request refused');
+  if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) throw new HttpError(415, 'send JSON');
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw new HttpError(413, 'request too large');
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw new HttpError(400, 'invalid JSON');
+  }
+}
 
 // Returns an http.Server that isn't listening yet. The collectors are injected so tests can use fakes.
 // `getVersion` returns cached state only (see version.mjs), so /healthz never waits on git or a collector.
 export function createDashboardServer({
-  getQuotas, getWorkspaceStatus, getPipelineOverview, getVersion = () => UNKNOWN_VERSION,
+  getQuotas, getWorkspaceStatus, getPipelineOverview, getVersion = () => UNKNOWN_VERSION, settings = pipelineSettings,
   allowedHosts = parseAllowedHosts(), indexFile = path.join(HERE, 'index.html'), log = console.error,
 }) {
   const api = {
@@ -47,8 +75,13 @@ export function createDashboardServer({
       res.writeHead(400).end();
       return;
     }
+    const send = (status, data) => res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(data));
     try {
-      if (Object.hasOwn(api, url.pathname)) {
+      if (url.pathname === '/api/pipeline/settings') {
+        if (req.method === 'GET') send(200, await settings.get());
+        else if (req.method === 'POST') send(200, await settings.set(await readJsonBody(req, allowedHosts)));
+        else res.writeHead(405, { Allow: 'GET, POST' }).end();
+      } else if (Object.hasOwn(api, url.pathname)) {
         const data = await api[url.pathname](url.searchParams.has('force'));
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(data));
       } else if (url.pathname === '/' || url.pathname === '/index.html') {
@@ -58,6 +91,10 @@ export function createDashboardServer({
         res.writeHead(404).end();
       }
     } catch (err) {
+      if (err instanceof HttpError || err instanceof SettingsInputError) {
+        if (res.headersSent) return void res.destroy();
+        return void send(err.status || 400, { error: err.message });
+      }
       // Error messages can carry paths or tokens, so they stay in the server log.
       log(`${req.method} ${url.pathname} failed:`, err);
       if (res.headersSent) return void res.destroy();

@@ -243,6 +243,17 @@
   .pipeline a:hover { text-decoration-color: currentColor; }
   .pipeline-totals { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 12px; font-size: 12.5px; color: var(--ink-2); }
   .pipeline-totals strong { font-variant-numeric: tabular-nums; }
+  .pipeline-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 12px; font-size: 12.5px; color: var(--ink-2); }
+  .pipeline-settings label { font-weight: 600; color: var(--ink-1); }
+  .pipeline-settings input {
+    font: inherit; font-size: 13px; width: 4.5em; color: var(--ink-1); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-variant-numeric: tabular-nums;
+  }
+  .pipeline-settings input:focus-visible { outline: 2px solid var(--fill); outline-offset: 2px; }
+  .pipeline-settings button { padding: 5px 12px; }
+  .pipeline-settings .settings-status { color: var(--ink-muted); font-size: 12px; }
+  .pipeline-settings .settings-status.healthy { color: var(--healthy); }
+  .pipeline-settings .settings-status.warning { color: var(--warning-ink); }
   .attention-group { margin: 10px 0 4px; font-size: 12px; font-weight: 600; color: var(--ink-muted); }
   .attention-list, .pipe-list { list-style: none; margin: 0; padding: 0; }
   .attention-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; padding: 8px 0; border-top: 1px solid var(--hairline); font-size: 13px; }
@@ -342,8 +353,14 @@
     <div class="workspace-head">
       <h2 id="pipeline-title">Agent pipeline</h2>
       <div class="workspace-meta" id="pipeline-meta">Loading…</div>
-      <button type="button" class="disclosure" id="pipeline-toggle" aria-expanded="true" aria-controls="pipeline-content" hidden><span aria-hidden="true">▾</span> Hide details</button>
+      <button type="button" class="disclosure" id="pipeline-toggle" aria-expanded="true" aria-controls="plans-form pipeline-content" hidden><span aria-hidden="true">▾</span> Hide details</button>
     </div>
+    <form class="pipeline-settings" id="plans-form" novalidate>
+      <label for="plans-per-day">Plans per day</label>
+      <input id="plans-per-day" name="maxPlansPerDay" type="number" inputmode="numeric" min="0" max="48" step="1" disabled aria-describedby="plans-status">
+      <button type="submit" id="plans-save" disabled>Save</button>
+      <span class="settings-status" id="plans-status" role="status">Loading…</span>
+    </form>
     <div id="pipeline-content"><p class="workspace-note">Loading the pipeline overview…</p></div>
   </section>
   <section class="workspace" id="workspace" aria-labelledby="workspace-title">
@@ -975,6 +992,7 @@
     const p = pipeline, o = p?.overview;
     if (!p || !o) {
       pipelinePanel.show(true, false, 'pipeline-content'); // loading or unavailable: the body holds the only explanation
+      $('plans-form').hidden = false;
       $('pipeline-meta').innerHTML = pipelineError || p ? 'Unavailable' : 'Loading…';
       if (pipelineError || p) $('pipeline-content').innerHTML = `<p class="workspace-note warning">Pipeline overview unavailable${pipelineError ? ' (can’t reach the dashboard server)' : p?.error ? ` (${esc(p.error)})` : ''}. Retrying every minute.</p>`;
       return;
@@ -984,6 +1002,7 @@
     const keys = [...attention.map(attentionKey), ...problems.flatMap((x) => x.keys || [x.key])];
     const open = pipelinePanel.expanded(keys, keys.length > 0);
     pipelinePanel.show(open, true, 'pipeline-content');
+    $('plans-form').hidden = !open;
     const days = o.windowDays || 7;
     $('pipeline-meta').innerHTML = open
       ? esc(`${plural(repos.length, 'repo')} in scope · GitHub read ${p.fetchedAt ? ago(p.fetchedAt) : 'at an unknown time'} · refreshes every ${Math.round((p.refreshMs || 300_000) / 60_000)} min${p.refreshing ? ' · updating…' : ''}`)
@@ -1031,6 +1050,82 @@
       renderPipeline();
     }
   }
+  // ---------- pipeline settings (/api/pipeline/settings, from `agentctl settings --json` / `agentctl set`) ----------
+  // The form sits outside #pipeline-content, so the minute-by-minute re-render never wipes what's being typed.
+  // It's part of the panel's details: Hide details hides it with the rest (renderPipeline sets that).
+  let pipelineSettings = null;
+  let settingsMessage = null; // { text, level } after a save, until the next edit
+  const plansInput = $('plans-per-day');
+  let plansDirty = false; // the owner has typed a number that isn't saved yet
+  // The plan count resets at 00:00 UTC; say when that is in the viewer's own time.
+  function nextUtcMidnight() {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  function renderPipelineSettings({ resetInput = false } = {}) {
+    const s = pipelineSettings?.settings?.maxPlansPerDay;
+    plansInput.disabled = $('plans-save').disabled = !s;
+    if (!s) {
+      $('plans-status').className = `settings-status${pipelineSettings === false ? ' warning' : ''}`;
+      $('plans-status').textContent = pipelineSettings === false ? 'Couldn’t read the pipeline settings. Retrying every minute.' : 'Loading…';
+      return;
+    }
+    plansInput.min = s.min;
+    plansInput.max = s.max;
+    // Don't overwrite a number the owner is typing.
+    if (resetInput || (document.activeElement !== plansInput && !plansDirty)) {
+      plansInput.value = s.value;
+      plansDirty = false;
+    }
+    const today = pipelineSettings.plansToday ?? 0;
+    const resets = `${nextUtcMidnight()} (00:00 UTC)`;
+    const usage = today >= s.value
+      ? `${today} launched today: the cap is reached, so no new plans until ${resets}`
+      : `${today} of ${s.value} launched today · the count resets at ${resets}`;
+    const source = s.overridden ? ` · config.json says ${s.configValue}` : '';
+    $('plans-status').className = `settings-status ${settingsMessage?.level || ''}`;
+    $('plans-status').textContent = settingsMessage ? `${settingsMessage.text} · ${usage}` : `${usage}${source}`;
+  }
+  async function loadPipelineSettings() {
+    try {
+      const res = await fetch('/api/pipeline/settings', { cache: 'no-store', signal: timeoutSignal(30_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      pipelineSettings = await res.json();
+    } catch {
+      if (!pipelineSettings) pipelineSettings = false;
+    }
+    renderPipelineSettings();
+  }
+  plansInput.oninput = () => {
+    plansDirty = true;
+    settingsMessage = null;
+    renderPipelineSettings();
+  };
+  $('plans-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const s = pipelineSettings?.settings?.maxPlansPerDay;
+    if (!s) return;
+    const value = plansInput.value.trim() === '' ? NaN : Number(plansInput.value);
+    if (!Number.isInteger(value) || value < s.min || value > s.max) {
+      settingsMessage = { text: `Enter a whole number from ${s.min} to ${s.max}`, level: 'warning' };
+      return renderPipelineSettings();
+    }
+    $('plans-save').disabled = plansInput.disabled = true;
+    try {
+      const res = await fetch('/api/pipeline/settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxPlansPerDay: value }), signal: timeoutSignal(30_000),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      pipelineSettings = body;
+      settingsMessage = { text: `Saved: ${value === 0 ? 'no new plans' : plural(value, 'plan')} per day, from the pump’s next run`, level: 'healthy' };
+      renderPipelineSettings({ resetInput: true });
+    } catch (err) {
+      settingsMessage = { text: `Not saved (${err.message || 'can’t reach the dashboard server'})`, level: 'warning' };
+      renderPipelineSettings();
+    }
+  };
+
   // Remember which repos are expanded across re-renders (toggle doesn't bubble, so listen while capturing).
   document.addEventListener('toggle', (e) => {
     const slug = e.target?.dataset?.slug;
@@ -1112,7 +1207,7 @@
   async function refreshAll(force = false) {
     $('refresh').disabled = true;
     try {
-      await Promise.all([load(force), loadWorkspace(force), loadPipeline(force)]);
+      await Promise.all([load(force), loadWorkspace(force), loadPipeline(force), loadPipelineSettings()]);
     } finally {
       $('refresh').disabled = false;
     }
@@ -1447,7 +1542,7 @@
 
   refreshAll();
   setInterval(() => document.visibilityState === 'visible' && loadWorkspace(), 30_000);
-  setInterval(() => document.visibilityState === 'visible' && loadPipeline(), 60_000);
+  setInterval(() => document.visibilityState === 'visible' && (loadPipeline(), loadPipelineSettings()), 60_000);
   setInterval(load, 120_000);
   setInterval(() => { render(true); renderWorkspace(true); renderPipeline(); }, 15_000);
 </script>

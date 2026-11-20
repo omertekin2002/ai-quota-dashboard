@@ -6,6 +6,7 @@
 // reading happens. Any request that isn't to the test server is aborted and fails the test.
 import { test as base, expect } from '@playwright/test';
 import { createDashboardServer } from '../server.mjs';
+import { createPipelineSettings } from '../pipeline-settings.mjs';
 import { historyForApi, historySpan, incidentEpisodes, pruneEvents } from '../workspace-history.mjs';
 
 const HOUR = 3_600_000;
@@ -114,8 +115,8 @@ function quietPipeline() {
 const test = base.extend({
   // A dashboard server on a free port, and helpers for the page under test.
   dash: async ({ page, context }, use) => {
-    const state = { quotas: quotasOf(), workspace: healthyWorkspace(), pipeline: pipelineOf(), failQuotas: false };
-    const calls = { quotas: [], workspace: [], pipeline: [] };
+    const state = { quotas: quotasOf(), workspace: healthyWorkspace(), pipeline: pipelineOf(), failQuotas: false, maxPlansPerDay: 12, plansToday: 3 };
+    const calls = { quotas: [], workspace: [], pipeline: [], agentctl: [] };
     const logged = [];
     const server = createDashboardServer({
       getQuotas: async (force) => {
@@ -126,6 +127,16 @@ const test = base.extend({
       getWorkspaceStatus: async (force) => (calls.workspace.push(force), state.workspace),
       getPipelineOverview: async (force) => (calls.pipeline.push(force), state.pipeline),
       getVersion: () => ({ commit: '0123abc', startedAt: Date.now() - HOUR, restartNeeded: false, behindUpstream: false }),
+      // The real settings module with a fake agentctl, so the request checks and validation run as in production.
+      settings: createPipelineSettings({
+        run: async (file, args) => {
+          calls.agentctl.push(args);
+          if (args[0] === 'set') state.maxPlansPerDay = Number(args[2]);
+          const value = state.maxPlansPerDay;
+          return JSON.stringify({ version: 1, day: new Date().toISOString().slice(0, 10), plansToday: state.plansToday,
+            settings: { maxPlansPerDay: { value, configValue: 12, overridden: value !== 12, min: 0, max: 48, describe: 'plans' } } });
+        },
+      }),
       log: (...args) => logged.push(args.map(String).join(' ')),
     });
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -692,4 +703,46 @@ test('a quota refresh that fails after a good one keeps the last reading, marked
   await expect(page.locator('#banner')).toBeEmpty();
   await expect(page.locator('#meta')).not.toContainText("Couldn't refresh");
   await expect(claude.locator('.fresh')).toHaveText('● Live');
+});
+
+// ---------- Plans per day ----------
+test('Plans per day: change the cap with the keyboard, see it saved and counted, without sideways scroll', async ({ page, dash }) => {
+  await dash.open();
+  const input = page.locator('#plans-per-day');
+  const status = page.locator('#plans-status');
+  await expect(input).toHaveValue('12');
+  await expect(status).toContainText('3 of 12 launched today');
+  await expect(page.locator('label[for="plans-per-day"]')).toBeVisible();
+  await expectNoSideScroll(page);
+
+  // Out of range: refused in the page, nothing sent to agentctl.
+  await input.fill('60');
+  await input.press('Enter');
+  await expect(status).toContainText('Enter a whole number from 0 to 48');
+  expect(dash.calls.agentctl.filter((a) => a[0] === 'set')).toEqual([]);
+
+  await input.fill('5');
+  await input.press('Enter');
+  await expect(status).toContainText('Saved: 5 plans per day');
+  await expect(status).toContainText('3 of 5 launched today');
+  expect(dash.calls.agentctl.filter((a) => a[0] === 'set')).toEqual([['set', 'maxPlansPerDay', '5']]);
+
+  // The cap survives a reload and the page says config.json differs.
+  await dash.reload();
+  await expect(input).toHaveValue('5');
+  await expect(status).toContainText('config.json says 12');
+  await expectNoSideScroll(page);
+});
+
+test('Plans per day: another site’s page can’t change the cap through the owner’s browser', async ({ page, dash }) => {
+  await dash.open();
+  // Same request the form sends, but as a cross-origin form post and as a fetch with a foreign Origin.
+  const statuses = await page.evaluate(async () => {
+    const asForm = await fetch('/api/pipeline/settings', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'maxPlansPerDay=40' });
+    return [asForm.status];
+  });
+  expect(statuses).toEqual([415]);
+  const foreign = await page.request.post(`${dash.origin}/api/pipeline/settings`, { headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, data: { maxPlansPerDay: 40 } });
+  expect(foreign.status()).toBe(403);
+  expect(dash.calls.agentctl.filter((a) => a[0] === 'set')).toEqual([]);
 });

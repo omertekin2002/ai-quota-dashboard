@@ -60,7 +60,13 @@ The data comes from `agentctl overview --json` in build-workflow. That command i
 
 While the reading is healthy, the panel collapses to one line in its header, such as "✓ Nothing needs you · 2 jobs running · 3 queued · 4 stacked in umbrellas", and **Show details** opens the totals, the attention list and the repos. Healthy means that nothing needs your attention, the last update worked and the dashboard server answered, GitHub was available and returned everything, the pipeline isn't paused and is configured, and no active job is overdue for a heartbeat or launch. Any of these opens the panel. While the overview is loading or unavailable, the panel always shows its body, because that holds the only explanation. Once you open or close it, it stays that way through refreshes. The browser remembers that choice, separately from the Workspace computer's, when it can store it. An attention item or problem that wasn't on screen before still opens it, so a new item is never hidden. With the panel closed, its header names how many items need you and what's wrong. Following the glance tile's **Needs you** link, or loading the page at `#pipeline`, opens it too.
 
-Unlike the process panel below, this panel publishes GitHub issue and PR titles and job summaries. Keep the dashboard tailnet-only.
+### Plans per day
+
+The top of the panel's details holds the one setting the dashboard can change: **Plans per day**, the most plan turns the pump launches per UTC day (0 stops new plans; 0–48). Type a number and press **Save** or Enter. The pump uses it from its next run, within 10 minutes. Next to the field the page shows how many plans launched today, when the count resets (00:00 UTC, in your own time), and what `config.json` says when the saved value differs from it.
+
+The server reads the setting with `agentctl settings --json` and saves it with `agentctl set maxPlansPerDay <n>`. Both run per request, are local and take no GitHub calls. agentctl keeps the value in `~/.agent-workflow/settings.json`, which overrides build-workflow's `config.json`, so the repo stays clean. `GET /api/pipeline/settings` reads it; `POST /api/pipeline/settings` with a JSON body such as `{"maxPlansPerDay": 6}` changes it. This is the dashboard's only write, so it's guarded beyond the `Host` check. The request must carry an `Origin` header naming an allowed host and a JSON content type, which a plain form on another site can't send. Only `maxPlansPerDay` is accepted, as a whole number from 0 to 48, and the body is limited to 4 KB. Anything else is refused before agentctl runs.
+
+Unlike the process panel below, this panel publishes GitHub issue and PR titles and job summaries. Anyone who can open it can also change Plans per day. Keep the dashboard tailnet-only.
 
 ## Workspace computer
 

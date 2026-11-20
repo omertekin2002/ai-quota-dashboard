@@ -17,7 +17,7 @@ const pageScript = new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
 // `media.fine` is what `matchMedia('(hover: hover) and (pointer: fine)')` answers: a mouse or trackpad.
 // `hash` is the page URL's fragment at load; `location.hash` can change later, and `fire('hashchange')` announces it.
 // `storage` is the page's `localStorage` (none by default, as in a vm), e.g. a Map-backed stub or one that throws.
-async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, version = null, now, hidden = () => false, respond, abortSignalTimeout = true, hash = '', storage } = {}) {
+async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] }, workspace = { supported: false }, pipeline = {}, settings = null, version = null, now, hidden = () => false, respond, abortSignalTimeout = true, hash = '', storage } = {}) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
@@ -73,8 +73,10 @@ async function loadDashboard({ quotas = { generatedAt: Date.now(), accounts: [] 
   const globals = {
     document,
     // `version: null` answers /api/version with a 404, like a server from before it existed.
-    fetch: async (url, init) => respond?.(url, init) ?? (url.startsWith('/api/version')
-      ? { ok: version != null, status: version != null ? 200 : 404, json: async () => version }
+    // `settings: null` answers /api/pipeline/settings with a 404, like a server from before it existed.
+    fetch: async (url, init) => respond?.(url, init) ?? (url.startsWith('/api/version') || url.startsWith('/api/pipeline/settings')
+      ? (url.startsWith('/api/version') ? { ok: version != null, status: version != null ? 200 : 404, json: async () => version }
+        : { ok: settings != null, status: settings != null ? 200 : 404, json: async () => (typeof settings === 'function' ? settings(url, init) : settings) })
       : { ok: true, json: async () => (url.startsWith('/api/quotas') ? quotas : url.startsWith('/api/workspace') ? workspace : pipeline) }),
     AbortSignal: abortSignalTimeout ? { timeout: (ms) => { const controller = new AbortController(); signals.push({ ms, controller }); return controller.signal; } } : {},
     AbortController,
@@ -788,8 +790,8 @@ test('every page request is bounded: quotas at least 60 s, version 10 s, workspa
   const requests = [];
   const { signals } = await loadDashboard({ respond: (url, init) => { requests.push([url.split('?')[0], init?.signal]); } });
   const bounds = requests.map(([url, signal]) => [url, signals.find((s) => s.controller.signal === signal)?.ms]);
-  assert.deepEqual(Object.fromEntries(bounds), { '/api/version': 10_000, '/api/quotas': 60_000, '/api/workspace': 12_000, '/api/pipeline': 100_000 });
-  assert.equal(bounds.length, 4);
+  assert.deepEqual(Object.fromEntries(bounds), { '/api/version': 10_000, '/api/quotas': 60_000, '/api/workspace': 12_000, '/api/pipeline': 100_000, '/api/pipeline/settings': 30_000 });
+  assert.equal(bounds.length, 5);
 });
 
 test('the quota timeout grows by 30 s per account in the last reading, since the server reads accounts one at a time', async () => {
@@ -954,7 +956,7 @@ test('without AbortSignal.timeout (Safari before 16) every request still gets it
   const { element, run, timers } = page;
   assert.ok(element('content').innerHTML.includes('<span class="big">70%</span>'), element('content').innerHTML);
   assert.equal(run('workspaceError || pipelineError'), false);
-  assert.deepEqual(timers.map((t) => t.ms), [10_000, 60_000, 12_000, 100_000]); // version, quotas, workspace, pipeline
+  assert.deepEqual(timers.map((t) => t.ms), [10_000, 60_000, 12_000, 100_000, 30_000]); // version, quotas, workspace, pipeline, settings
 
   hung = true;
   const clicked = element('refresh').onclick();
@@ -1367,17 +1369,17 @@ test('At a glance adds no requests: load, every timer and Refresh fetch the same
   const page = await glancePage({ respond: (url) => { urls.push(url); } });
   const fire = async (ms) => { for (const i of page.intervals.filter((x) => x.ms === ms)) i.fn(); await settle(); };
   assert.deepEqual(page.intervals.map((i) => i.ms).sort((a, b) => a - b), [15_000, 30_000, 60_000, 120_000]);
-  assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas', '/api/workspace', '/api/pipeline'], 'on load');
+  assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas', '/api/workspace', '/api/pipeline', '/api/pipeline/settings'], 'on load');
   await fire(15_000);
   assert.deepEqual(urls.splice(0), [], 'the 15-second clock tick only re-renders');
   await fire(30_000);
   assert.deepEqual(urls.splice(0), ['/api/workspace'], '30-second timer');
   await fire(60_000);
-  assert.deepEqual(urls.splice(0), ['/api/pipeline'], '1-minute timer');
+  assert.deepEqual(urls.splice(0), ['/api/pipeline', '/api/pipeline/settings'], '1-minute timer');
   await fire(120_000);
   assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas'], '2-minute timer');
   await page.element('refresh').onclick();
-  assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas?force', '/api/workspace?force', '/api/pipeline?force'], 'Refresh');
+  assert.deepEqual(urls.splice(0), ['/api/version', '/api/quotas?force', '/api/workspace?force', '/api/pipeline?force', '/api/pipeline/settings'], 'Refresh');
   assert.equal(page.timers.length, 0, 'no new timers either');
   assert.ok(!/fetch\(/.test(html.slice(html.indexOf('// ---------- At a glance'), html.indexOf('async function refreshAll'))), 'the tile code fetches nothing');
 });
@@ -1608,7 +1610,7 @@ test('the Agent pipeline header has a Hide/Show details button that controls its
   const at = (marker) => { const i = html.indexOf(marker); assert.ok(i > 0, marker); return i; };
   const toggle = html.match(/<button[^>]* id="pipeline-toggle"[^>]*>/)[0];
   assert.match(toggle, /type="button"/);
-  assert.match(toggle, /aria-controls="pipeline-content"/);
+  assert.match(toggle, /aria-controls="plans-form pipeline-content"/);
   assert.match(toggle, / hidden>/, 'hidden until there is a reading to collapse');
   assert.ok(at('id="pipeline-title"') < at('id="pipeline-toggle"') && at('id="pipeline-toggle"') < at('<div id="pipeline-content">'));
 });
@@ -1667,7 +1669,7 @@ test('any attention item or problem opens the pipeline panel on first render', a
 test('loading and unavailable pipeline readings always show the body, with no toggle', async () => {
   let resolve;
   const loading = await glancePage({ hidden: (id) => id === 'pipeline-toggle', // as in the markup
-    respond: (url) => (url.startsWith('/api/pipeline') ? new Promise((r) => { resolve = r; }) : undefined) });
+    respond: (url) => (url.split('?')[0] === '/api/pipeline' ? new Promise((r) => { resolve = r; }) : undefined) });
   loading.tick();
   assert.equal(loading.element('pipeline-content').hidden, false);
   assert.equal(loading.element('pipeline-toggle').hidden, true);
@@ -1798,4 +1800,80 @@ test('the collapsed pipeline summary escapes problem text and never shows readin
   assert.deepEqual(pipelineDisclosure(page), PIPE_CLOSED);
   assert.ok(!page.element('pipeline-meta').innerHTML.includes('<img'));
   assert.equal(pipelineMeta(page), '✓ Nothing needs you · ⚠ last update failed · 2 jobs running · 3 queued · 4 stacked in umbrellas');
+});
+
+// ---------- Plans per day (the pipeline's owner settings) ----------
+const settingsOf = (value = 12, plansToday = 3, configValue = 12) => ({
+  version: 1, day: '2026-11-20', plansToday,
+  settings: { maxPlansPerDay: { value, configValue, overridden: value !== configValue, min: 0, max: 48, describe: 'plans' } },
+});
+
+test('Plans per day shows the cap and today’s count, saves a new cap as JSON, and refuses bad numbers without a request', async () => {
+  const posts = [];
+  let current = settingsOf();
+  const page = await glancePage({
+    settings: (url, init) => {
+      if (init?.method === 'POST') { posts.push({ headers: { ...init.headers }, body: JSON.parse(init.body) }); current = settingsOf(JSON.parse(init.body).maxPlansPerDay, 3); }
+      return current;
+    },
+  });
+  const { element } = page;
+  assert.equal(element('plans-per-day').value, 12);
+  assert.equal(element('plans-per-day').disabled, false);
+  assert.match(element('plans-status').textContent, /^3 of 12 launched today · the count resets at .+ \(00:00 UTC\)$/);
+
+  const submit = async (value) => {
+    element('plans-per-day').value = value;
+    element('plans-per-day').oninput();
+    await element('plans-form').onsubmit({ preventDefault() {} });
+    await settle();
+  };
+  for (const bad of ['', '-1', '49', '2.5']) {
+    await submit(bad);
+    assert.match(element('plans-status').textContent, /^Enter a whole number from 0 to 48/, bad);
+  }
+  assert.equal(posts.length, 0);
+
+  await submit('6');
+  assert.deepEqual(posts, [{ headers: { 'Content-Type': 'application/json' }, body: { maxPlansPerDay: 6 } }]);
+  assert.match(element('plans-status').textContent, /^Saved: 6 plans per day, from the pump’s next run · 3 of 6 launched today/);
+  assert.equal(element('plans-status').className.includes('healthy'), true);
+
+  // A later reading doesn't overwrite a number being typed.
+  element('plans-per-day').value = '9';
+  element('plans-per-day').oninput();
+  await page.run('loadPipelineSettings()');
+  assert.equal(element('plans-per-day').value, '9');
+  assert.match(element('plans-status').textContent, /config\.json says 12$/);
+
+  current = settingsOf(2, 3);
+  await page.run('loadPipelineSettings()');
+  assert.match(element('plans-status').textContent, /^3 launched today: the cap is reached, so no new plans until .+ \(00:00 UTC\)/);
+});
+
+test('Plans per day says when it can’t read or save the setting', async () => {
+  const missing = await glancePage(); // a server without the endpoint
+  assert.equal(missing.element('plans-per-day').disabled, true);
+  assert.match(missing.element('plans-status').textContent, /Couldn’t read the pipeline settings/);
+
+  const page = await glancePage({
+    settings: settingsOf(),
+    respond: (url, init) => (init?.method === 'POST' ? { ok: false, status: 400, json: async () => ({ error: 'maxPlansPerDay must be a whole number from 0 to 48' }) } : undefined),
+  });
+  page.element('plans-per-day').value = '7';
+  await page.element('plans-form').onsubmit({ preventDefault() {} });
+  assert.match(page.element('plans-status').textContent, /^Not saved \(maxPlansPerDay must be a whole number from 0 to 48\)/);
+  assert.equal(page.element('plans-per-day').disabled, false);
+});
+
+test('Plans per day is part of the pipeline details: hidden with them, shown while there’s no reading to collapse', async () => {
+  const quiet = await glancePage({ settings: settingsOf() }); // a healthy reading collapses the panel
+  assert.equal(quiet.element('pipeline-content').hidden, true);
+  assert.equal(quiet.element('plans-form').hidden, true);
+  quiet.element('pipeline-toggle').onclick();
+  assert.equal(quiet.element('plans-form').hidden, false);
+  quiet.element('pipeline-toggle').onclick();
+  assert.equal(quiet.element('plans-form').hidden, true);
+  const failed = await glancePage({ settings: settingsOf(), respond: (url) => (url.split('?')[0] === '/api/pipeline' ? { ok: false, status: 500, json: async () => ({}) } : undefined) });
+  assert.equal(failed.element('plans-form').hidden, false);
 });
