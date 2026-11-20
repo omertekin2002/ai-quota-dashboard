@@ -103,6 +103,37 @@ test('daily plans use the pump launch counter and configured limit, and roll ove
   assert.deepEqual((await monitor()).dailyPlans, { day: '2026-10-27', launched: 0, limit: 42, remaining: 42, resetsAt: Date.parse('2026-10-28T00:00:00Z') });
 });
 
+test('daily plans use the cap saved with Plans per day (settings.json) over config.json, like the pump', async (t) => {
+  const f = await setup(t);
+  await f.file('repo/config.json', { maxPlansPerDay: 12 });
+  await f.file('workflow/state.json', { plansByDay: { '1970-01-01': 49 } });
+  const monitor = createAgentWorkflowMonitor({ ...f.options, run: async () => null });
+  assert.deepEqual((await monitor()).dailyPlans, { day: '1970-01-01', launched: 49, limit: 12, remaining: 0, resetsAt: 86_400_000 });
+  const cases = [
+    { settings: { maxPlansPerDay: 60 }, limit: 60, remaining: 11 },
+    { settings: { maxPlansPerDay: 0 }, limit: 0, remaining: 0 },
+    { settings: { maxPlansPerDay: '75' }, limit: 75, remaining: 26 },
+    // Entries agentctl ignores leave config.json's value in effect.
+    { settings: { maxPlansPerDay: 101 }, limit: 12, remaining: 0 },
+    { settings: { maxPlansPerDay: -1 }, limit: 12, remaining: 0 },
+    { settings: { maxPlansPerDay: 2.5 }, limit: 12, remaining: 0 },
+    { settings: { maxPlansPerDay: null }, limit: 12, remaining: 0 },
+    { settings: { maxWorkers: 3 }, limit: 12, remaining: 0 },
+    { settings: [60], limit: 12, remaining: 0 },
+    { settings: 'invalid JSON', limit: 12, remaining: 0 },
+  ];
+  for (const c of cases) {
+    await f.file('workflow/settings.json', c.settings);
+    const plans = (await monitor()).dailyPlans;
+    assert.equal(plans.limit, c.limit, JSON.stringify(c.settings));
+    assert.equal(plans.remaining, c.remaining, JSON.stringify(c.settings));
+  }
+  // The saved cap applies even when config.json can't be read.
+  await f.file('workflow/settings.json', { maxPlansPerDay: 60 });
+  await f.file('repo/config.json', 'invalid JSON');
+  assert.equal((await monitor()).dailyPlans.limit, 60);
+});
+
 test('daily plans preserve unavailable readings and handle zero or exceeded limits', async (t) => {
   const f = await setup(t);
   const monitor = createAgentWorkflowMonitor({ ...f.options, run: async () => null });

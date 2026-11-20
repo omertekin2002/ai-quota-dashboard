@@ -1132,6 +1132,7 @@
       pipelineSettings = body;
       settingsMessage = { text: `Saved: ${value === 0 ? 'no new plans' : plural(value, 'plan')} per day, from the pump’s next run`, level: 'healthy' };
       renderPipelineSettings({ resetInput: true });
+      loadWorkspace(true); // the Daily plans bar in Computer diagnostics shows the new cap now, not on its next reading
     } catch (err) {
       settingsMessage = { text: `Not saved (${err.message || 'can’t reach the dashboard server'})`, level: 'warning' };
       renderPipelineSettings();
