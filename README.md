@@ -13,7 +13,7 @@ npm run json         # print current quotas as JSON and exit
 
 At the top, an **At a glance** strip answers three questions before you scroll. Each tile's title links to its full panel:
 
-- **Capacity**: one line per account with its tightest known window, its % left, the reset countdown and the same **⚠ Low** / **⛔ Nearly out** text as the cards. A stale account shows its reading age (◷), an account with no readable usage shows `—`, and a window past its reset says "Estimated". Accounts are never added up or compared with each other, because a percentage of one subscription isn't the same capacity as a percentage of another.
+- **Capacity**: one line per account with its tightest known window, its % left, the reset countdown and the same **⚠ Low** / **⛔ Nearly out** text as the cards. A stale account shows its reading age (◷), an account with no readable usage shows `—`, and a window past its reset counts as unknown until a provider confirms it: the line uses the account's tightest current window and adds "· 1 reset awaiting confirmation", or says "Reset due · awaiting confirmation" when no window is current. It never shows 100% left for a reset nobody has confirmed. Accounts are never added up or compared with each other, because a percentage of one subscription isn't the same capacity as a percentage of another.
 - **Needs you**: how many items in the [Agent pipeline](#agent-pipeline)'s "Needs your attention" list are waiting on you, counted by kind (for example "2 blocked · 1 decision · 1 umbrella to merge"), with 🔥 when one is urgent. Otherwise it says "Nothing needs you".
 - **Workspace**: "All OK" when every [Workspace computer](#workspace-computer) reading is healthy. Otherwise it counts the critical (⛔) and warning (⚠) conditions and names the first two, such as "⛔ CLIProxyAPI check failed". The tile and the panels use the same level rules for services and their HTTP checks, memory, internet, battery, temperature, disks, the T7 backup and the auto-updater, so the two can't disagree.
 
@@ -28,6 +28,8 @@ For each account and limit window, including model-specific ones such as Claude'
 - a **Low** warning (≤30% left) or **Nearly out** warning (≤10% left)
 - a pace projection: how much will be left at the reset if you keep the current rate
 - a tick on the meter marking how much of the window's time is left. If the bar ends left of the tick, you're using the quota faster than it refills.
+
+Once a window's reset time passes, the page doesn't assume the allowance came back: a countdown reaching zero isn't proof that the provider reset it. Until a reading reports the new window, the card and the Table show **Reset due · awaiting confirmation** instead of a percentage, with no meter fill, Low/Nearly out label or pace projection, and the tab title leaves the window out. Its footer says "Refreshing…" while the page fetches fresh numbers, or gives the reading's age when it can't (a stale account, or while quota loads fail). The window's details keep the last reported figure and when it was read, for example "Last reading: 62% used, 3h ago (before the reset)". The next reading with a new reset time shows the provider's figure again, including a real 0% used.
 
 When Anthropic's usage API reports no 5-hour window for a Claude account (`five_hour: null`), its card says "No 5-hour limit reported by Anthropic for this account" below the windows, so a missing 5-hour row isn't mistaken for a failed reading. No 5-hour row or percentage is made up for it.
 

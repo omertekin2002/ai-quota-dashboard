@@ -448,6 +448,48 @@ test('window details open by tap or click, toggle by Enter and Space, close by E
   await expect(detailsOf(fiveHour)).toBeHidden();
 });
 
+test('a window whose reset passed shows Reset due, opens to its last reading, and returns to a percentage on fresh data', async ({ page, dash, isMobile }) => {
+  // Claude's 5-hour window: 62% used at a reading 3 hours old, with a reset time that passed a minute ago.
+  const quotas = quotasOf({ claudeUsed: 62 });
+  quotas.accounts[0].fetchedAt = Date.now() - 3 * HOUR;
+  quotas.accounts[0].windows[0].resetsAt = Date.now() - 60_000;
+  dash.state.quotas = quotas;
+  await dash.open();
+  const claude = card(page, 'claude-user@example.com');
+  const fiveHour = claude.locator('.win').nth(0);
+  await expect(fiveHour.locator('.pending')).toHaveText('Reset due · awaiting confirmation');
+  await expect(fiveHour.locator('.big, .fill, .pace, .status')).toHaveCount(0);
+  await expect(fiveHour.locator('.win-main')).not.toContainText('%');
+  await expect(fiveHour.locator('.win-foot')).toHaveText('Refreshing…');
+  // Capacity: the account's other window, with the pending reset noted, and never 100% left. The title skips it too.
+  const glanceRow = page.locator('#glance-capacity .glance-row').first();
+  await expect(glanceRow).toContainText('Weekly 60% left');
+  await expect(glanceRow).toContainText('1 reset awaiting confirmation');
+  await expect(page.locator('#glance-capacity')).not.toContainText('100%');
+  await expect(page).toHaveTitle('60% · 50% · 95% · Quotas');
+  await expectNoSideScroll(page);
+
+  await press(fiveHour, isMobile);
+  await expect(fiveHour.locator('.win-details')).toContainText('Last reading: 62% used, 3h ago (before the reset)');
+  await expect(fiveHour.locator('.win-details')).not.toContainText('Left:');
+  await expectNoSideScroll(page);
+
+  await page.locator('#view').click();
+  await expect(page.locator('#content tbody tr').first()).toContainText('Reset due · awaiting confirmation');
+  await expect(page.locator('#content tbody tr').first()).not.toContainText('%');
+  await page.locator('#view').click();
+
+  // The provider reports the new window: nothing used yet. The page shows its figure again.
+  const fresh = quotasOf({ claudeUsed: 0 });
+  fresh.accounts[0].windows[0].resetsAt = Date.now() + 5 * HOUR;
+  dash.state.quotas = fresh;
+  await dash.refresh();
+  await expect(fiveHour.locator('.big')).toHaveText('100%');
+  await expect(page.locator('#content')).not.toContainText('Reset due');
+  await expect(glanceRow).not.toContainText('awaiting confirmation');
+  await expect(page).toHaveTitle('60% · 50% · 95% · Quotas');
+});
+
 // ---------- 3. workspace warning ----------
 test('workspace warning: a failed HTTP check opens the panel, the tile names it, and Hide/Show details toggles it', async ({ page, dash }) => {
   dash.state.workspace = failingCheckWorkspace();
