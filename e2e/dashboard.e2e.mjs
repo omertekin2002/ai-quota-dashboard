@@ -6,7 +6,7 @@
 // reading happens. Any request that isn't to the test server is aborted and fails the test.
 import { test as base, expect } from '@playwright/test';
 import { createDashboardServer } from '../server.mjs';
-import { incidentEpisodes } from '../workspace-history.mjs';
+import { historyForApi, historySpan, incidentEpisodes, pruneEvents } from '../workspace-history.mjs';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -511,6 +511,43 @@ test('incidents: the Incidents card lists an active and a recovered episode in t
   dash.state.workspace.history.episodes = [];
   await dash.refresh();
   await expect(incidents).toContainText('No incidents in the last seven days');
+});
+
+test('incidents: a long history is served trimmed, counts every incident, and Recent events says how far back it goes', async ({ page, dash }) => {
+  const ws = healthyWorkspace(), now = Date.now(), MIN = 60_000;
+  const ev = (timestamp, key, title, level = 'info') => ({ id: `${timestamp}:${key}:${title}`, timestamp, level, title });
+  // A day and seven hours of HTTP-check failures and recoveries, one pair every 20 minutes, through the server's own trimming.
+  const events = pruneEvents(Array.from({ length: 186 }, (_, i) => {
+    const t = now - (i + 1) * 10 * MIN, check = Math.floor(i / 2) % 3;
+    return i % 2 ? ev(t, `check-${check}`, `Check ${check} · HTTP check: response failed`, 'warning') : ev(t, `check-${check}`, `Check ${check} · HTTP check: response recovered`);
+  }), now);
+  const startedAt = now - 31 * HOUR, serve = (droppedAt) => {
+    ws.history = { ...ws.history, ...historyForApi({ events, episodes: incidentEpisodes(events, now), samples: [], startedAt, persisted: true, ...historySpan({ events, startedAt, droppedAt }, now) }) };
+  };
+  serve(null);
+  expect(ws.history.events).toHaveLength(20);
+  expect(ws.history.episodes).toHaveLength(20);
+  dash.state.workspace = ws;
+  await dash.open();
+  await workspace(page).toggle.click();
+  await expectWorkspaceOpen(page, true);
+
+  const incidents = page.locator('.incidents-card');
+  await expect(incidents.locator('li.incident')).toHaveCount(10);
+  await expect(incidents).toContainText('Showing 10 of 93 incidents.');
+  const recent = page.locator('.diagnostic-card', { has: page.locator('h3', { hasText: 'Recent events' }) });
+  await expect(recent.locator('li.event-row')).toHaveCount(10);
+  await expect(recent).toContainText(/History since .+ \(1d 7h\) · kept for up to seven days\./);
+  await expect(recent).not.toContainText('retained for seven days');
+  await recent.scrollIntoViewIfNeeded();
+  await expectNoSideScroll(page);
+
+  // The cap dropped older events: the span starts at the oldest kept one and says why.
+  serve(events.at(-1).timestamp - 1);
+  dash.state.workspace = ws;
+  await dash.refresh();
+  await expect(recent).toContainText(/History since .+ \(1d 7h\) · older events dropped to stay within 1000 events\./);
+  await expectNoSideScroll(page);
 });
 
 test('incidents: an incident opens to its recorded events by tap or keyboard, and stays open through a refresh', async ({ page, dash, isMobile }) => {

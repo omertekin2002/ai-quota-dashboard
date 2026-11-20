@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkspaceHistory, incidentEpisodes, isRoutineEvent, pruneEvents, MAX_EVENTS, MAX_ROUTINE_EVENTS, MAX_EPISODE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS, MONITOR_GAP_MS } from '../workspace-history.mjs';
+import { createWorkspaceHistory, historyForApi, historySpan, incidentEpisodes, isRoutineEvent, pruneEvents, readHistoryFile, stateFileOf, MAX_EVENTS, API_EVENTS, API_EPISODES, FULL_WRITE_MS, MAX_ROUTINE_EVENTS, MAX_EPISODE_EVENTS, MEMORY_SETTLE_MS, LINK_SETTLE_MS, MONITOR_GAP_MS } from '../workspace-history.mjs';
 
 const DAY = 86400_000, START = 1_800_000_000_000;
 
@@ -130,15 +130,15 @@ test('warning and critical agent events use the main budget, not the routine one
   assertWellFormed(result.events, s.generatedAt);
 });
 
-test('pruning caps the total at 100 and lets routine activity fill only what is left', () => {
+test('pruning caps the total at MAX_EVENTS and lets routine activity fill only what is left', () => {
   const now = START;
   const event = (i, key, level = 'info') => ({ id: `${now - i * 1000}:${key}:Event ${i}`, timestamp: now - i * 1000, level, title: `Event ${i}` });
   const routine = Array.from({ length: 50 }, (_, i) => event(i, `agent-job:job-${i}`));
-  const other = Array.from({ length: 150 }, (_, i) => event(100 + i, 'internet', 'warning'));
+  const other = Array.from({ length: MAX_EVENTS + 50 }, (_, i) => event(100 + i, 'internet', 'warning'));
   const full = pruneEvents([...routine, ...other], now);
   assert.equal(full.length, MAX_EVENTS);
   assert.equal(full.filter(isRoutineEvent).length, 0);
-  const some = pruneEvents([...routine, ...other.slice(0, 90)], now);
+  const some = pruneEvents([...routine, ...other.slice(0, MAX_EVENTS - 10)], now);
   assert.equal(some.length, MAX_EVENTS);
   assert.equal(some.filter(isRoutineEvent).length, 10);
   assert.deepEqual(some.filter(isRoutineEvent).map((e) => e.title), routine.slice(0, 10).map((e) => e.title));
@@ -439,8 +439,11 @@ test('a history file from the previous build loads unchanged and gains episodes 
   const result = await createWorkspaceHistory({ file })(s);
   assert.deepEqual(result.episodes.map((e) => [e.title, e.state, e.startedAt, e.endedAt]), [['T3 Code: failed', 'recovered', now - 2 * DAY, now - 2 * DAY + MIN]]);
   const stored = JSON.parse(await readFile(file, 'utf8'));
-  assert.deepEqual(Object.keys(stored).sort(), ['events', 'lastSuccessAt', 'previous', 'samples', 'startedAt', 'version']);
+  // Only `droppedAt` is new; an older build ignores it. This file was under the old cap, so nothing was dropped.
+  assert.deepEqual(Object.keys(stored).sort(), ['droppedAt', 'events', 'lastSuccessAt', 'previous', 'samples', 'startedAt', 'version']);
+  assert.equal(stored.droppedAt, null);
   assert.deepEqual(stored.events, events);
+  assert.deepEqual([result.oldestAt, result.trimmed], [now - 4 * DAY, false]);
 });
 
 const monitorEvents = (result) => result.events.filter((e) => /^\d+:(monitor|boot):/.test(e.id)).map((e) => [e.title, e.timestamp]).reverse();
@@ -569,7 +572,7 @@ test('unknown memory readings neither finish the settle time nor start a new inc
 test('the recorded memory condition and its settle time survive a restart', async (t) => {
   const file = await tempFile(t), s = snapshot(START);
   await readings(createWorkspaceHistory({ file }), s, [[0, 'healthy'], [MIN, 'warning'], [2 * MIN, 'healthy'], [3 * MIN, 'healthy']]);
-  const stored = JSON.parse(await readFile(file, 'utf8'));
+  const stored = await readHistoryFile(file);
   assert.deepEqual([stored.previous.memory, stored.previous.memoryRecorded, stored.previous.memoryHealthySince], ['healthy', 'warning', START + 2 * MIN]);
   // A new recorder on the same file finishes the settle time without reopening the incident.
   const record = createWorkspaceHistory({ file });
@@ -601,7 +604,7 @@ test('a history file from the previous build, without a recorded memory conditio
   result = await record(s);
   assert.deepEqual(memoryEvents(result), [[OPENED, 'warning', now - 2 * MIN], [RECOVERED, 'info', now]]);
   assert.deepEqual(byKey(result.episodes, 'memory').map((e) => [e.state, e.startedAt, e.endedAt]), [['recovered', now - 2 * MIN, now]]);
-  const stored = JSON.parse(await readFile(file, 'utf8'));
+  const stored = await readHistoryFile(file);
   assert.equal(stored.version, 1);
   assert.deepEqual([stored.previous.memoryRecorded, stored.previous.memoryHealthySince], ['healthy', null]);
 });
@@ -755,7 +758,7 @@ test('an unreadable counter on a new network does not carry the old network\'s c
 test('the open link incident, its drop count and settle time survive a restart of the recorder', async (t) => {
   const file = await tempFile(t), s = snapshot(START);
   await linkReadings(createWorkspaceHistory({ file }), s, [[0, 10], [MIN, 12], [2 * MIN, 13], [3 * MIN, 13]]);
-  const stored = JSON.parse(await readFile(file, 'utf8'));
+  const stored = await readHistoryFile(file);
   assert.deepEqual(stored.previous.link, { drops: 3, lastDropAt: START + 2 * MIN, steadySince: START + 3 * MIN });
   // A new recorder continues the incident: another drop joins it instead of opening a second one.
   let result = await linkReadings(createWorkspaceHistory({ file }), s, [[4 * MIN, 14], [5 * MIN, 14]]);
@@ -763,7 +766,7 @@ test('the open link incident, its drop count and settle time survive a restart o
   // And another one finishes it with the total from before both restarts.
   result = await linkReadings(createWorkspaceHistory({ file }), s, [[4 * MIN + LINK_SETTLE_MS, 14]]);
   assert.deepEqual(linkEvents(result), [[UNSTABLE(2), 'warning', START + MIN], [STEADY(4), 'info', START + 5 * MIN]]);
-  assert.equal(JSON.parse(await readFile(file, 'utf8')).previous.link, null);
+  assert.equal((await readHistoryFile(file)).previous.link, null);
 });
 
 test('a history file from the previous build, without link incident state, starts with no open incident', async (t) => {
@@ -827,4 +830,183 @@ test('a day of Wi-Fi drop bursts, as seen live on 2026-11-17/18, records about t
   assert.equal(episodes.length, BURSTS);
   assert.ok(episodes.every((e) => e.state === 'recovered' && e.eventCount === 2));
   assert.equal(link.filter(([, level]) => level === 'info').reduce((sum, [title]) => sum + Number(/after (\d+) drop/.exec(title)[1]), 0), counter - 100);
+});
+
+// ---------- Seven-day budget, API trimming and history span ----------
+// A week as recorded live in November 2026: incident events in failure/recovery pairs, `perDay` a day, the
+// oldest a minute inside the seven days and the newest a moment before `now`. Newest first.
+const WEEK_KINDS = [
+  ['memory', 'Memory pressure elevated or available RAM low', 'warning', 'Memory pressure recovered'],
+  ['link', 'Network link unstable: dropped 2 time(s)', 'warning', 'Network link steady again after 2 drops'],
+  ['internet', 'Internet became limited', 'warning', 'Internet connection restored'],
+  ['t3-tailscale', 'T3 Code · Tailscale web: response failed', 'warning', 'T3 Code · Tailscale web: response recovered'],
+  ['backup', 'T7 backup failed', 'critical', 'T7 backup completed successfully'],
+  ['agent-timer', 'Agent pump timer inactive', 'warning', 'Agent pump timer enabled'],
+];
+function liveWeek(now, perDay = 90) {
+  const step = (7 * DAY - 2 * MIN) / (7 * perDay), first = now - 7 * DAY + MIN, events = [];
+  for (let i = 0; i < 7 * perDay; i++) {
+    const [key, opened, level, closed] = WEEK_KINDS[Math.floor(i / 2) % WEEK_KINDS.length], t = Math.round(first + i * step);
+    events.push(i % 2 ? ev(t, key, closed) : ev(t, key, opened, level));
+  }
+  return events.reverse();
+}
+const quietPrevious = (now) => ({ readAt: now - 30_000, uptimeSec: 900, internet: 'online', network: 'Wi-Fi', disconnections: 1, memory: 'healthy', oomKills: 0,
+  services: { 't3code.service': { state: 'running', startedAt: 100, restarts: 0 } }, health: {}, disks: {}, backup: 'unknown', backupFinished: null });
+
+test('seven days at about 90 incident events a day are all kept, and nothing older is', () => {
+  const now = START + 30 * DAY, week = liveWeek(now);
+  assert.equal(week.length, 630);
+  const routine = Array.from({ length: 200 }, (_, i) => ev(now - i * 45 * MIN - 1000, `agent-job:job-${i}`, `Workflow job job-${i}: done`));
+  const old = [ev(now - 7 * DAY - MIN, 'internet', 'Internet became limited', 'warning'), ev(now - 8 * DAY, 'memory', 'Memory pressure recovered')];
+  const kept = pruneEvents([...old, ...routine, ...week], now);
+  assert.deepEqual(kept.filter((e) => !isRoutineEvent(e)).map((e) => e.id), week.map((e) => e.id));
+  // Routine activity still keeps only its newest 20 events.
+  assert.deepEqual(kept.filter(isRoutineEvent).map((e) => e.title), routine.slice(0, MAX_ROUTINE_EVENTS).map((e) => e.title));
+  assertWellFormed(kept, now);
+  // Every failure in the week pairs with its recovery; none lost its start.
+  const episodes = incidentEpisodes(kept, now);
+  assert.equal(episodes.length, 315);
+  assert.ok(episodes.every((e) => e.state === 'recovered' && e.startedAt != null && e.eventCount === 2));
+});
+
+test('/api/workspace serves the newest events and episodes, every active one and the true totals, paired from the full history', async (t) => {
+  const file = await tempFile(t), now = START + 30 * DAY;
+  // A service that failed three days ago and recovered a minute ago, among a week of other incidents.
+  const events = [ev(now - MIN, 't3code.service', 'T3 Code: running'), ...liveWeek(now - 30_000), ev(now - 3 * DAY, 't3code.service', 'T3 Code: failed', 'warning')]
+    .sort((a, b) => b.timestamp - a.timestamp);
+  await writeFile(file, JSON.stringify({ version: 1, events, samples: [], previous: quietPrevious(now), lastSuccessAt: null, startedAt: now - 20 * DAY, droppedAt: null }));
+  const record = createWorkspaceHistory({ file });
+  const result = await record(snapshot(now)), api = historyForApi(result);
+  assert.equal(result.events.length, 632);
+  assert.deepEqual([api.events.length, api.eventCount, api.eventLimit], [API_EVENTS, 632, MAX_EVENTS]);
+  assert.deepEqual(api.events, result.events.slice(0, API_EVENTS));
+  assert.deepEqual([api.episodes.length, api.episodeCount], [API_EPISODES, result.episodes.length]);
+  assert.ok(api.episodeCount > 300);
+  assert.deepEqual(api.episodes, result.episodes.slice(0, API_EPISODES));
+  const [service] = byKey(api.episodes, 't3code.service');
+  assert.deepEqual([service.state, service.startedAt, service.endedAt, service.caveats], ['recovered', now - 3 * DAY, now - MIN, []]);
+  assert.ok(api.episodes.every((e) => e.startedAt != null), 'no start is reported as not retained');
+  // More active incidents than API_EPISODES: every one is served, ahead of the recovered ones.
+  const failing = Array.from({ length: API_EPISODES + 5 }, (_, i) => ev(now - 3 * DAY + i * 1000, `check-${i}`, `Check ${i}: response failed`, 'warning'));
+  const busy = historyForApi({ ...result, episodes: incidentEpisodes([...failing, ...result.events], now) });
+  assert.equal(busy.episodes.length, API_EPISODES + 5);
+  assert.ok(busy.episodes.every((e) => e.state === 'active'));
+  assert.equal(busy.episodeCount, api.episodeCount + API_EPISODES + 5);
+  // The live-sized response is smaller than serving everything was.
+  assert.ok(JSON.stringify(api).length < JSON.stringify(result).length / 10);
+});
+
+test('the history span says when monitoring started, covers at most seven days, and starts later when the cap dropped events', () => {
+  const now = START + 30 * DAY, events = liveWeek(now, 10);
+  assert.deepEqual(historySpan({ events, startedAt: now - DAY, droppedAt: null }, now), { oldestAt: now - DAY, trimmed: false });
+  assert.deepEqual(historySpan({ events, startedAt: now - 20 * DAY, droppedAt: null }, now), { oldestAt: now - 7 * DAY, trimmed: false });
+  assert.deepEqual(historySpan({ events: [], startedAt: null, droppedAt: null }, now), { oldestAt: now, trimmed: false });
+  // A cap drop within the seven days moves the start to the oldest kept incident event, not a routine one.
+  const routine = ev(events.at(-1).timestamp - MIN, 'agent-job:job-1', 'Workflow job job-1: done');
+  assert.deepEqual(historySpan({ events: [...events, routine], startedAt: now - 20 * DAY, droppedAt: events.at(-1).timestamp - 1 }, now), { oldestAt: events.at(-1).timestamp, trimmed: true });
+  // A drop older than seven days no longer limits the span.
+  assert.deepEqual(historySpan({ events, startedAt: now - 20 * DAY, droppedAt: now - 7 * DAY - 1 }, now), { oldestAt: now - 7 * DAY, trimmed: false });
+});
+
+test('the recorder notes when the cap drops an event, and a file from an older build full at its 100-event cap counts as trimmed', async (t) => {
+  const now = START + 30 * DAY;
+  // An older build's file at its cap: no `droppedAt`, 100 incident events over the last day and a half.
+  const legacyFile = await tempFile(t), legacy = liveWeek(now, 100 / 7).slice(0, 100).map((e, i) => ({ ...e, timestamp: now - (i + 1) * 20 * MIN, id: e.id.replace(/^\d+/, now - (i + 1) * 20 * MIN) }));
+  await writeFile(legacyFile, JSON.stringify({ version: 1, events: legacy, samples: [], previous: quietPrevious(now), lastSuccessAt: null, startedAt: now - 20 * DAY }));
+  let result = await createWorkspaceHistory({ file: legacyFile })(snapshot(now));
+  assert.deepEqual([result.events.length, result.trimmed, result.oldestAt], [100, true, now - 100 * 20 * MIN]);
+  assert.equal(JSON.parse(await readFile(legacyFile, 'utf8')).droppedAt, now - 100 * 20 * MIN - 1);
+  // One under the old cap is not.
+  await writeFile(legacyFile, JSON.stringify({ version: 1, events: legacy.slice(0, 99), samples: [], previous: quietPrevious(now), lastSuccessAt: null, startedAt: now - 20 * DAY }));
+  result = await createWorkspaceHistory({ file: legacyFile })(snapshot(now));
+  assert.deepEqual([result.trimmed, result.oldestAt], [false, now - 7 * DAY]);
+  // A history at MAX_EVENTS drops its oldest event when a new one comes in, and says so from then on.
+  const file = await tempFile(t), full = liveWeek(now, MAX_EVENTS / 7);
+  assert.equal(full.length, MAX_EVENTS);
+  await writeFile(file, JSON.stringify({ version: 1, events: full, samples: [], previous: quietPrevious(now), lastSuccessAt: null, startedAt: now - 20 * DAY, droppedAt: null }));
+  const record = createWorkspaceHistory({ file }), s = snapshot(now);
+  result = await record(s);
+  assert.deepEqual([result.trimmed, result.oldestAt], [false, now - 7 * DAY]);
+  s.generatedAt += 30_000;
+  s.internet.state = 'offline';
+  result = await record(s);
+  assert.equal(result.events.length, MAX_EVENTS);
+  assert.deepEqual([result.trimmed, result.oldestAt], [true, full.at(-2).timestamp]);
+  assert.equal((await readHistoryFile(file)).droppedAt, full.at(-1).timestamp);
+  s.generatedAt += 30_000;
+  result = await createWorkspaceHistory({ file })(s);
+  assert.deepEqual([result.trimmed, result.oldestAt], [true, full.at(-2).timestamp]);
+});
+
+test('readings that record nothing rewrite only the small companion file, and a restart resumes from it', async (t) => {
+  const file = await tempFile(t), s = snapshot(START), record = createWorkspaceHistory({ file });
+  await record(s);
+  const full = await readFile(file, 'utf8');
+  for (let i = 1; i <= 4; i++) {
+    s.generatedAt = START + i * 30_000;
+    assert.equal((await record(s)).persisted, true);
+  }
+  assert.equal(await readFile(file, 'utf8'), full);
+  const state = JSON.parse(await readFile(stateFileOf(file), 'utf8'));
+  assert.deepEqual(Object.keys(state).sort(), ['previous', 'samples', 'version']);
+  assert.equal(state.previous.readAt, START + 120_000);
+  assert.equal((await readHistoryFile(file)).previous.readAt, START + 120_000);
+  assert.equal((await readHistoryFile(file)).samples.length, state.samples.length);
+  // A new event rewrites the full file.
+  s.generatedAt += 30_000;
+  s.internet.state = 'offline';
+  await record(s);
+  const changedAt = s.generatedAt;
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).previous.readAt, changedAt);
+  // Without one, the full file is rewritten every FULL_WRITE_MS.
+  s.generatedAt = changedAt + FULL_WRITE_MS - 1;
+  await record(s);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).previous.readAt, changedAt);
+  s.generatedAt = changedAt + FULL_WRITE_MS;
+  await record(s);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).previous.readAt, changedAt + FULL_WRITE_MS);
+  // Three minutes later only the companion file has the reading, and a restart a minute after it resumes from
+  // there: no monitoring gap and no repeated event.
+  s.generatedAt += 3 * MIN;
+  await record(s);
+  s.generatedAt += MIN;
+  const result = await createWorkspaceHistory({ file })(s);
+  assert.deepEqual(monitorEvents(result), [['Computer monitoring started', START]]);
+  assert.equal(result.events.filter((e) => e.title === 'Internet became offline').length, 1);
+  // A companion file older than the full file is ignored.
+  await writeFile(stateFileOf(file), JSON.stringify({ version: 1, samples: [], previous: { ...quietPrevious(START), readAt: START } }));
+  assert.equal((await readHistoryFile(file)).previous.internet, 'offline');
+});
+
+test('a failed full write is retried on later readings and never hidden by the companion file', async (t) => {
+  const file = await tempFile(t), s = snapshot(START), record = createWorkspaceHistory({ file });
+  await record(s);
+  await mkdir(`${file}.tmp`); // the next full write fails
+  s.generatedAt += 30_000;
+  s.internet.state = 'offline';
+  assert.equal((await record(s)).persisted, false);
+  await assert.rejects(readFile(stateFileOf(file), 'utf8'));
+  s.generatedAt += 30_000;
+  assert.equal((await record(s)).persisted, false);
+  await assert.rejects(readFile(stateFileOf(file), 'utf8'));
+  await rm(`${file}.tmp`, { recursive: true });
+  s.generatedAt += 30_000;
+  assert.equal((await record(s)).persisted, true);
+  assert.ok((await readHistoryFile(file)).events.some((e) => e.title === 'Internet became offline'));
+});
+
+test('a full seven-day history at the cap stays a bounded file, and each reading between full writes is small', async (t) => {
+  const file = await tempFile(t), now = START + 30 * DAY, s = snapshot(now);
+  const events = liveWeek(now, MAX_EVENTS / 7);
+  const samples = Array.from({ length: 60 }, (_, i) => ({ timestamp: now - (60 - i) * 30_000, state: 'online', latencyMs: 123 }));
+  await writeFile(file, JSON.stringify({ version: 1, events, samples, previous: quietPrevious(now), lastSuccessAt: null, startedAt: now - 20 * DAY, droppedAt: null }));
+  const record = createWorkspaceHistory({ file });
+  await record(s);
+  s.generatedAt += 30_000;
+  await record(s);
+  const fullSize = (await readFile(file)).length, stateSize = (await readFile(stateFileOf(file))).length;
+  t.diagnostic(`full file at ${MAX_EVENTS} events: ${fullSize} bytes; companion file: ${stateSize} bytes`);
+  assert.ok(fullSize < 250_000, `${fullSize} bytes`);
+  assert.ok(stateSize < 10_000, `${stateSize} bytes`);
 });

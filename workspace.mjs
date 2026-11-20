@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDiagnostics, unitProperties, systemdTime } from './diagnostics.mjs';
-import { createWorkspaceHistory, memoryLevel } from './workspace-history.mjs';
+import { createWorkspaceHistory, historyForApi, memoryLevel } from './workspace-history.mjs';
 import { createAgentWorkflowMonitor } from './agent-workflow.mjs';
 
 const exec = promisify(execFile);
@@ -237,7 +237,7 @@ export function createWorkspaceMonitor({
         uptimeSec: number(uptime?.split(/\s+/)[0]) ?? os.uptime(),
         power, temperatures: sensors, memory, internet, services, autoUpdate, diagnostics: diagnostic,
       };
-      snapshot.history = await recordHistory(snapshot);
+      snapshot.history = historyForApi(await recordHistory(snapshot));
       snapshot.diagnostics.backup.lastSuccessAt = snapshot.history.lastSuccessAt;
       snapshot.diagnostics.memoryLevel = memoryLevel(snapshot);
       return snapshot;
