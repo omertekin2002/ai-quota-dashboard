@@ -71,6 +71,16 @@ test('claudeWindows reads fixed windows, model-scoped limits and extra usage', (
   assert.equal(windows[4].shareOfWeeklyPct, 25);
   assert.equal(windows[5].shareOfWeeklyPct, null);
   assert.deepEqual(claudeWindows({ extra_usage: { is_enabled: false, utilization: 50 } }), []);
+  // `scope`: null for the account-wide windows, else the model or feature the window alone limits.
+  assert.deepEqual(windows.map((w) => [w.id, w.scope]), [
+    ['five_hour', null],
+    ['seven_day', null],
+    ['seven_day_opus', 'Opus'],
+    ['seven_day_sonnet', 'Sonnet'],
+    ['weekly_fable', 'Fable'],
+    ['burst_haiku', 'Haiku'],
+    ['extra_usage', 'Extra usage'],
+  ]);
 });
 
 test('missing, null or non-numeric usage stays unknown instead of reading as 0', () => {
@@ -119,6 +129,15 @@ test('codexWindows labels every window shape the usage endpoint returns', () => 
   assert.equal(windows[2].resetsAt, null);
   const nested = codexWindows({ code_review_rate_limit: { rate_limit: { secondary_window: { used_percent: 4, limit_window_seconds: 5400 } } } }, NOW);
   assert.deepEqual(nested.map((w) => [w.id, w.label]), [['code-review-secondary', 'Code review · 90-min']]);
+  // `scope`: null for the account-wide windows, else the limit's name or the feature.
+  assert.deepEqual(windows.map((w) => [w.id, w.scope]), [
+    ['primary', null],
+    ['secondary', null],
+    ['extra-0-primary', 'GPT-5 Pro'],
+    ['extra-1-secondary', 'Limit 2'],
+    ['code-review-primary', 'Code review'],
+  ]);
+  assert.equal(nested[0].scope, 'Code review');
   assert.deepEqual([null, 18000, 604800, 28 * 86400, 31 * 86400, 86400, 7200, 90].map(windowLabel),
     [null, '5-hour', 'Weekly', 'Monthly', 'Monthly', '1-day', '2-hour', '2-min']);
 });

@@ -88,6 +88,14 @@ test('summary parsing preserves model groups, unknown figures, and genuine reset
   assert.equal(byId.unknown.windowSec, null);
   assert.equal(byId.unknown.resetUnknown, true);
   assert.ok(!byId.disabled);
+  // `scope` is the family the label starts with: Antigravity has no account-wide window.
+  assert.deepEqual(windows.map((w) => [w.id, w.scope]).sort(), [
+    ['3p-weekly', 'Claude & GPT (shared)'], ['clamped', 'Gemini 4 Argon'], ['gemini-5h', 'Gemini'],
+    ['gemini-argon-weekly', 'Gemini 4 Argon'], ['nan', 'Gemini 4 Argon'], ['string', 'Gemini 4 Argon'], ['unknown', 'Gemini 4 Argon'],
+  ]);
+  for (const w of windows) assert.equal(w.label.split(' · ')[0], w.scope);
+  assert.equal(antigravitySummaryWindows({ buckets: [bucket('gemini-argon-weekly'), bucket('other-5h')] }, NOW).find((w) => w.id === 'gemini-argon-weekly').scope, 'Gemini Argon');
+  assert.equal(antigravitySummaryWindows({ buckets: [bucket('other-5h')] }, NOW)[0].scope, 'other-5h');
   for (const input of [null, {}, { groups: [null, 1, { buckets: {} }] }]) assert.deepEqual(antigravitySummaryWindows(input), []);
   assert.doesNotThrow(() => antigravitySummaryWindows({ groups: [{ displayName: 42, buckets: [bucket('gemini-argon-5h')] }] }));
 });
@@ -116,6 +124,9 @@ test('legacy quotas keep the most-used model per family without inventing a cade
   assert.equal(byId['gemini-weekly'].windowSec, 604800);
   assert.equal(byId['claude-quota'].usedPct, 100);
   assert.ok(byId['gpt-quota']);
+  assert.deepEqual(windows.map((w) => [w.id, w.scope]).sort(), [
+    ['claude-quota', 'Claude'], ['gemini-quota', 'Gemini'], ['gemini-weekly', 'Gemini'], ['gpt-quota', 'GPT'],
+  ]);
   assert.deepEqual(antigravityModelWindows({ models: [] }), []);
 });
 
