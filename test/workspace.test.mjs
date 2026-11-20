@@ -185,14 +185,16 @@ test('reads the auto-update timer read-only, with one systemctl show call', asyn
       calls.push([file, ...args]);
       return file === 'systemctl' && args.includes('ai-quota-dashboard-update.service') ? raw : null;
     } })();
-    return result.autoUpdate;
+    // The history's fields are covered by the unreachable tests below.
+    const { unreachableSince, lastOkAt, unreachableForMs, unreachableWarning, ...status } = result.autoUpdate;
+    return status;
   };
   const lastRunAt = Date.parse('2026-10-29T19:45:49+03:00'), nextRunAt = Date.parse('2026-10-29T20:00:48+03:00');
 
   assert.deepEqual(await read(updateUnits()), { state: 'ok', timerActive: true, lastRunAt, lastExitStatus: 0, nextRunAt });
   const updaterCalls = calls.filter((c) => c.some((a) => a.includes('ai-quota-dashboard-update')));
   assert.deepEqual(updaterCalls, [['systemctl', '--user', 'show', 'ai-quota-dashboard-update.service', 'ai-quota-dashboard-update.timer',
-    '--property=Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime', '--no-pager']]);
+    '--property=Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime', '--no-pager']]);
   // Nothing here controls a unit, reads the journal, or runs git.
   assert.ok(!calls.some(([file, ...args]) => file === 'journalctl' || file === 'git'
     || (file === 'systemctl' && args.some((a) => ['start', 'stop', 'restart', 'enable', 'disable', 'reset-failed'].includes(a)))));
@@ -236,4 +238,87 @@ test('systemctl runs in UTC, so a local zone name such as CET never hides a time
   assert.equal(autoUpdate.state, 'ok');
   assert.equal(autoUpdate.lastRunAt, Date.parse('2026-10-29T19:45:49+03:00'));
   assert.equal(autoUpdate.nextRunAt, Date.parse('2026-10-29T20:00:48+03:00'));
+});
+
+// What update.sh writes to the journal for a run, as `journalctl -o cat` prints it.
+const FETCH_REFUSAL = [
+  'Starting ai-quota-dashboard-update.service - Fast-forward the AI quota dashboard from origin/main...',
+  "fatal: unable to access 'https://github.com/omertekin2002/ai-quota-dashboard.git/': Could not resolve host: github.com",
+  'ai-quota-dashboard-update: refusing: git fetch origin main failed or timed out after 60s',
+  'ai-quota-dashboard-update.service: Main process exited, code=exited, status=1/FAILURE',
+  "ai-quota-dashboard-update.service: Failed with result 'exit-code'.",
+].join('\n');
+const LOCAL_CHANGES = [
+  'ai-quota-dashboard-update: refusing: /home/user/ai-quota-dashboard has local changes:',
+  ' M index.html',
+  'ai-quota-dashboard-update.service: Main process exited, code=exited, status=1/FAILURE',
+].join('\n');
+
+test('a failed run whose journal shows only the fetch refusal is unreachable, read from the journal once per run', async (t) => {
+  const options = await fixture(t);
+  let units = updateUnits({ service: { ActiveState: 'failed', Result: 'exit-code', ExecMainStatus: '1', ExecMainStartTimestamp: 'Thu 2026-10-29 19:44:48 +03' } });
+  let journal = FETCH_REFUSAL;
+  const journalCalls = [];
+  let time = Date.parse('2026-10-29T19:46:00+03:00');
+  const monitor = createWorkspaceMonitor({ ...options, now: () => time, run: async (file, args) => {
+    if (file === 'journalctl') { journalCalls.push(args); return journal; }
+    return file === 'systemctl' && args.includes('ai-quota-dashboard-update.service') ? units : null;
+  } });
+  const first = (await monitor()).autoUpdate;
+  assert.equal(first.state, 'unreachable');
+  assert.equal(first.lastExitStatus, 1);
+  assert.equal(first.unreachableSince, Date.parse('2026-10-29T19:45:49+03:00'));
+  assert.equal(first.unreachableWarning, false);
+  // Only this run's lines, bounded, read-only.
+  assert.deepEqual(journalCalls, [['--user', '-u', 'ai-quota-dashboard-update.service',
+    `--since=@${Date.parse('2026-10-29T19:44:48+03:00') / 1000}`, `--until=@${Date.parse('2026-10-29T19:45:49+03:00') / 1000 + 1}`,
+    '-o', 'cat', '-n', '20', '--no-pager']]);
+  // The next 30-second polls of the same run don't read the journal again.
+  for (let i = 0; i < 3; i++) {
+    time += 30_000;
+    assert.equal((await monitor(true)).autoUpdate.state, 'unreachable');
+  }
+  assert.equal(journalCalls.length, 1);
+  // The next run failed for a different reason: its own journal is read once, and it is a real failure.
+  units = units.replace('19:45:49', '20:00:49').replace('19:44:48', '20:00:48');
+  journal = LOCAL_CHANGES;
+  time += 30_000;
+  assert.equal((await monitor(true)).autoUpdate.state, 'failed');
+  time += 30_000;
+  assert.equal((await monitor(true)).autoUpdate.state, 'failed');
+  assert.equal(journalCalls.length, 2);
+});
+
+test('a failed run stays failed when its journal shows another refusal, or cannot be read', async (t) => {
+  const options = await fixture(t);
+  const failed = updateUnits({ service: { ActiveState: 'failed', Result: 'exit-code', ExecMainStatus: '1', ExecMainStartTimestamp: 'Thu 2026-10-29 19:44:48 +03' } });
+  const read = async (journal, units = failed) => {
+    const calls = [];
+    const result = await createWorkspaceMonitor({ ...options, run: async (file, args) => {
+      calls.push(file);
+      if (file === 'journalctl') return journal;
+      return file === 'systemctl' && args.includes('ai-quota-dashboard-update.service') ? units : null;
+    } })();
+    return { state: result.autoUpdate.state, journal: calls.filter((f) => f === 'journalctl').length };
+  };
+  assert.deepEqual(await read(FETCH_REFUSAL), { state: 'unreachable', journal: 1 });
+  assert.deepEqual(await read(LOCAL_CHANGES), { state: 'failed', journal: 1 });
+  for (const refusal of ['/home/user/ai-quota-dashboard is not on a branch (detached HEAD)', "/home/user/ai-quota-dashboard is on branch 'dev', not 'main'",
+    "local main (abc1234) has commits origin/main (def5678) doesn't; can't fast-forward"]) {
+    assert.deepEqual(await read(`ai-quota-dashboard-update: refusing: ${refusal}`), { state: 'failed', journal: 1 }, refusal);
+  }
+  // A failed restart prints no refusal at all.
+  assert.deepEqual(await read('ai-quota-dashboard-update: fast-forwarded abc1234 → def5678\nFailed to restart ai-quota-dashboard.service: Unit not found.'), { state: 'failed', journal: 1 });
+  // journalctl failed, or found nothing.
+  assert.deepEqual(await read(null), { state: 'failed', journal: 1 });
+  assert.deepEqual(await read('-- No entries --'), { state: 'failed', journal: 1 });
+  // The fetch refusal quoted inside another refusal's output is not a line of its own.
+  assert.deepEqual(await read(`${LOCAL_CHANGES}\n M notes: ai-quota-dashboard-update: refusing: git fetch origin main failed or timed out after 60s`), { state: 'failed', journal: 1 });
+  // Without a start time there is no bounded journal read, so it stays a failure.
+  assert.deepEqual(await read(FETCH_REFUSAL, updateUnits({ service: { ActiveState: 'failed', Result: 'exit-code', ExecMainStatus: '1' } })), { state: 'failed', journal: 0 });
+  // ok, running, never-run and not-installed readings never read the journal.
+  const start = { ExecMainStartTimestamp: 'Thu 2026-10-29 19:44:48 +03' };
+  for (const service of [{ ...start }, { ...start, ActiveState: 'activating' }, { ...start, ExecMainExitTimestamp: '' }, { LoadState: 'not-found', ExecMainExitTimestamp: '' }]) {
+    assert.equal((await read(FETCH_REFUSAL, updateUnits({ service }))).journal, 0, JSON.stringify(service));
+  }
 });

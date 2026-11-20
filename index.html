@@ -461,8 +461,12 @@
     const level = backup.state === 'failed' ? 'critical' : old || backup.scheduleActive === false ? 'warning' : backup.state === 'success' ? 'healthy' : '';
     return { old, level };
   }
-  // The update timer only counts as stopped once the updater is installed and readable.
-  const autoUpdateStatus = (u) => ({ failed: u.state === 'failed', timerStopped: !['not-installed', 'unknown'].includes(u.state) && u.timerActive === false });
+  // The update timer only counts as stopped once the updater is installed and readable. A run that couldn't reach
+  // GitHub is quiet until the server says the streak passed its 2-hour threshold (`unreachableWarning`).
+  const autoUpdateStatus = (u) => ({
+    failed: u.state === 'failed', unreachable: u.state === 'unreachable' && u.unreachableWarning === true,
+    timerStopped: !['not-installed', 'unknown'].includes(u.state) && u.timerActive === false,
+  });
 
   // Every workspace reading that needs attention, critical first, from the same rules the panels color by.
   function workspaceConditions(ws) {
@@ -491,8 +495,9 @@
       add(level, backup.state === 'failed' ? 'T7 backup failed' : old ? 'No successful T7 backup in 36h' : 'T7 backup schedule inactive');
     }
     if (ws.autoUpdate) {
-      const { failed, timerStopped } = autoUpdateStatus(ws.autoUpdate);
+      const { failed, unreachable, timerStopped } = autoUpdateStatus(ws.autoUpdate);
       if (failed) add('warning', 'Auto-update failed');
+      if (unreachable) add('warning', "Auto-update can't reach GitHub");
       if (timerStopped) add('warning', 'Auto-update timer stopped');
     }
     return [...out.filter((c) => c.level === 'critical'), ...out.filter((c) => c.level === 'warning')];
@@ -621,22 +626,29 @@
     renderDiagnostics(workspaceOpen, tick);
   }
 
-  // deploy/'s update timer: one quiet row when all is well, text warnings when it failed or stopped.
+  // deploy/'s update timer: one quiet row when all is well, text warnings when it failed or stopped. A run that
+  // couldn't reach GitHub stays a quiet row until the server marks the streak as past its threshold.
   function renderAutoUpdate(u) {
     if (!u) return ''; // a server from before /api/workspace reported it
     const row = (parts) => `<p class="auto-update">Auto-update: ${parts.filter(Boolean).join(' · ')}</p>`;
     if (u.state === 'not-installed') return row(['not installed']);
     if (u.state === 'unknown') return row(['status unavailable']);
     const last = u.lastRunAt ? `last run ${esc(fmtClock(u.lastRunAt))}` : '';
+    const { unreachable: unreachableWarning } = autoUpdateStatus(u);
+    const lastOk = Number.isFinite(u.lastOkAt) ? `last updated ${esc(fmtClock(u.lastOkAt))}` : '';
+    const unreachable = unreachableWarning
+      ? `<span class="warning">⚠ couldn't reach GitHub for ${esc(fmtDur((Number(u.unreachableForMs) || 0) / 1000))}${Number.isFinite(u.unreachableSince) ? ` (since ${esc(fmtClock(u.unreachableSince))})` : ''}</span>`
+      : `couldn't reach GitHub${u.lastRunAt ? ` at ${esc(fmtClock(u.lastRunAt))}` : ''}`;
     const result = {
       ok: `${last || 'last run'} <span class="healthy">✓</span>`,
       failed: `<span class="warning">⚠ ${last || 'last run'} failed${u.lastExitStatus != null ? ` · exit ${esc(u.lastExitStatus)}` : ''}</span>`,
+      unreachable: [unreachable, lastOk].filter(Boolean).join(' · '),
       running: `running now${last ? ` · ${last}` : ''}`,
       'never-run': 'no completed run recorded',
     }[u.state] || 'status unavailable';
     const timer = autoUpdateStatus(u).timerStopped ? '<span class="warning">⚠ timer stopped, so updates no longer run</span>'
       : u.nextRunAt ? `next ${esc(fmtClock(u.nextRunAt))}` : '';
-    const hint = u.state === 'failed' ? `see ${md('`journalctl --user -u ai-quota-dashboard-update`')}` : '';
+    const hint = u.state === 'failed' || unreachableWarning ? `see ${md('`journalctl --user -u ai-quota-dashboard-update`')}` : '';
     return row([result, timer, hint]);
   }
 
