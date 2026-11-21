@@ -854,6 +854,7 @@
   const ATTENTION = {
     'needs-human': { label: 'Blocked', group: 'Blocked until you act', level: 'critical', count: ['blocked', 'blocked'] },
     'local-checkout': { label: 'Checkout', group: 'Local checkouts out of sync', level: 'critical', count: ['checkout out of sync', 'checkouts out of sync'] },
+    'ci-blocked': { label: 'CI', group: 'GitHub Actions refusing to start jobs (billing)', level: 'critical', count: ['repo with CI blocked', 'repos with CI blocked'] },
     decision: { label: 'Decide', group: 'Decisions to answer', level: 'warning', count: ['decision', 'decisions'] },
     umbrella: { label: 'Merge', group: 'Umbrella PRs ready to review and merge', level: '', count: ['umbrella to merge', 'umbrellas to merge'] },
     review: { label: 'Review', group: 'Agent PRs waiting for your review', level: '', count: ['PR to review', 'PRs to review'] },
@@ -919,7 +920,7 @@
     const attention = r.attention || [], jobs = r.jobs || { active: [], recent: [] }, resolved = r.resolved || { issues: [], prs: [] };
     const stacked = r.stackedPrs || [];
     const open = pipelineOpen.has(r.slug) ? pipelineOpen.get(r.slug) : attention.some((a) => a.kind !== 'umbrella');
-    const blocking = attention.some((a) => ['needs-human', 'local-checkout', 'decision'].includes(a.kind));
+    const blocking = attention.some((a) => ['needs-human', 'local-checkout', 'ci-blocked', 'decision'].includes(a.kind));
     const badges = [
       !r.available ? badge('GitHub data unavailable', 'warning') : '',
       attention.length ? badge(`${attention.length} need${attention.length === 1 ? 's' : ''} you`, blocking ? 'critical' : 'warning') : '',
@@ -1026,10 +1027,10 @@
     if (o.configured === false) notes.push('Not configured: no webhook URL, so no jobs can launch.');
     if (o.github && !o.github.available) notes.push(`GitHub unavailable${o.github.errors?.[0] ? ` (${o.github.errors[0]})` : ''}. Only local items (jobs, checkouts) are current.`);
     if (o.github?.truncated?.length) notes.push(`Partial reading: ${o.github.truncated.join('; ')}.`);
-    const groups = Object.entries(ATTENTION).map(([kind, meta]) => {
-      const items = attention.filter((a) => a.kind === kind);
-      return items.length ? `<div class="attention-group">${esc(meta.group)} (${items.length})</div><ul class="attention-list">${items.map((a) => attentionRow(a)).join('')}</ul>` : '';
-    }).join('');
+    const group = (title, items) => items.length ? `<div class="attention-group">${esc(title)} (${items.length})</div><ul class="attention-list">${items.map((a) => attentionRow(a)).join('')}</ul>` : '';
+    // A kind newer than this page is still listed, under Other, so the list always matches its count.
+    const groups = Object.entries(ATTENTION).map(([kind, meta]) => group(meta.group, attention.filter((a) => a.kind === kind))).join('')
+      + group('Other', attention.filter((a) => !ATTENTION[a.kind]));
     const all = (k) => repos.reduce((sum, r) => sum + (r.issues?.[k]?.length || 0), 0);
     const pendingAnswers = repos.flatMap((r) => (r.pendingAnswers || []).length ? [`${repoName(r.slug)} (${r.pendingAnswers.map((d) => `#${esc(d.number)}`).join(', ')})`] : []);
     const totals = [

@@ -46,7 +46,7 @@ Without git or a `.git` directory, the version is unknown and the line shows not
 
 The **Agent pipeline** panel shows the state of the [build-workflow](https://github.com/omertekin2002/build-workflow) agent pipeline for every repo in its scope. Repos excluded in its `config.json` don't appear. Everything links to GitHub.
 
-- **Needs your attention**, across all repos: issues blocked on you (`agent:needs-human`, noting the decision that unblocks one), decisions to answer, umbrella PRs ready to review and merge, agent PRs waiting for review, and local checkouts the pump couldn't sync. Each item names the exact action. It's the same list as the daily digest's, because both come from the same build-workflow code. Items the digest still lists for out-of-scope repos are only counted.
+- **Needs your attention**, across all repos: issues blocked on you (`agent:needs-human`, noting the decision that unblocks one), decisions to answer, umbrella PRs ready to review and merge, agent PRs waiting for review, local checkouts the pump couldn't sync, and repos where GitHub Actions is refusing to start CI jobs (included minutes or budget used up, or a payment failed). Each item names the exact action. It's the same list as the daily digest's, because both come from the same build-workflow code. Items the digest still lists for out-of-scope repos are only counted.
 - **Per repo**, expanded automatically when something there is blocked on you:
   - open PRs, with the umbrella PR highlighted;
   - the PRs stacked into the umbrella since the last one merged;

@@ -1261,9 +1261,19 @@ test('At a glance, owner-blocked: the attention total, its count per kind, and �
   const page = await glancePage({ pipeline: pipelineOf([item('needs-human', 8), item('needs-human', 9), item('decision', 14, { urgent: true }), item('umbrella', 20)]) });
   assert.equal(tileText(page, 'attention'), '🔥 4 items need you 2 blocked · 1 decision · 1 umbrella to merge · 🔥 1 urgent');
   assert.ok(page.element('glance-attention').innerHTML.includes('<p class="glance-lead critical">'));
-  // Kinds are build-workflow's own, in its order; an unknown kind is only counted.
-  page.run(`pipeline.overview.attention = [{ kind: 'review', number: 1 }, { kind: 'review', number: 2 }, { kind: 'something-new', number: 3 }]; renderPipeline();`);
+  // Kinds are build-workflow's own, in its order; an unknown kind is counted as other and listed under Other.
+  page.run(`pipeline.overview.attention = [{ kind: 'review', number: 1 }, { kind: 'review', number: 2 }, { kind: 'something-new', number: 3, title: 'new thing', action: 'Act' }]; renderPipeline();`);
   assert.equal(tileText(page, 'attention'), '3 items need you 2 PRs to review · 1 other');
+  assert.ok(page.element('pipeline-content').innerHTML.includes('<div class="attention-group">Other (1)</div>'));
+  assert.ok(page.element('pipeline-content').innerHTML.includes('new thing'));
+  // GitHub Actions refusing jobs (build-workflow's pr-wait records it) blocks on the owner.
+  page.run(`pipeline.overview.attention = [{ kind: 'ci-blocked', repo: 'o/alpha', number: 72, url: 'https://github.com/o/alpha/pull/72', title: 'GitHub Actions is refusing to start CI jobs', detail: 'Since 2026-11-21 05:46 UTC', action: 'Add an Actions budget' }]; renderPipeline();`);
+  assert.equal(tileText(page, 'attention'), '1 item needs you 1 repo with CI blocked');
+  assert.ok(page.element('glance-attention').innerHTML.includes('<p class="glance-lead critical">'));
+  const listed = page.element('pipeline-content').innerHTML;
+  assert.ok(listed.includes('<div class="attention-group">GitHub Actions refusing to start jobs (billing) (1)</div>'));
+  assert.ok(listed.includes('Since 2026-11-21 05:46 UTC') && listed.includes('Add an Actions budget'));
+  assert.ok(!listed.includes('Nothing needs you right now.'));
   page.run(`pipeline.overview.attention = [{ kind: 'decision', number: 1 }]; pipeline.overview.github = { available: false, errors: ['down'] }; renderPipeline();`);
   assert.equal(tileText(page, 'attention'), '1 item needs you 1 decision ⚠ GitHub unavailable: only local items are current');
   assert.ok(page.element('glance-attention').innerHTML.includes('<p class="glance-lead warning">'));
