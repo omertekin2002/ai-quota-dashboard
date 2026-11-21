@@ -1847,12 +1847,14 @@ const settingsOf = (value = 12, plansToday = 3, configValue = 12) => ({
 
 test('Plans per day shows the cap and today’s count, saves a new cap as JSON, and refuses bad numbers without a request', async () => {
   const posts = [];
+  const workspaceReads = [];
   let current = settingsOf();
   const page = await glancePage({
     settings: (url, init) => {
       if (init?.method === 'POST') { posts.push({ headers: { ...init.headers }, body: JSON.parse(init.body) }); current = settingsOf(JSON.parse(init.body).maxPlansPerDay, 3); }
       return current;
     },
+    respond: (url) => { if (url.startsWith('/api/workspace')) workspaceReads.push(url); },
   });
   const { element } = page;
   assert.equal(element('plans-per-day').value, 12);
@@ -1870,8 +1872,11 @@ test('Plans per day shows the cap and today’s count, saves a new cap as JSON, 
     assert.match(element('plans-status').textContent, /^Enter a whole number from 0 to 100/, bad);
   }
   assert.equal(posts.length, 0);
+  assert.deepEqual(workspaceReads, ['/api/workspace']); // only the first load
 
   await submit('6');
+  // The Daily plans bar in Computer diagnostics is read again at once, so it shows the new cap.
+  assert.deepEqual(workspaceReads, ['/api/workspace', '/api/workspace?force']);
   assert.deepEqual(posts, [{ headers: { 'Content-Type': 'application/json' }, body: { maxPlansPerDay: 6 } }]);
   assert.match(element('plans-status').textContent, /^Saved: 6 plans per day, from the pump’s next run · 3 of 6 launched today/);
   assert.equal(element('plans-status').className.includes('healthy'), true);

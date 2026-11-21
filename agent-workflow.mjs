@@ -27,6 +27,15 @@ async function mapLimited(items, fn) {
   return results;
 }
 
+// The cap saved with Plans per day (`agentctl set maxPlansPerDay`), which agentctl keeps in settings.json and the
+// pump uses instead of config.json's. Same rule as agentctl's readOwnerSettings: a whole number from 0 to 100, as a
+// number or a numeric string; anything else (or no file) means config.json's value applies.
+function ownerPlansPerDay(settings) {
+  const raw = settings && typeof settings === 'object' && Object.hasOwn(settings, 'maxPlansPerDay') ? settings.maxPlansPerDay : undefined;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && /^\s*-?\d+\s*$/.test(raw) ? Number(raw) : NaN;
+  return Number.isInteger(n) && n >= 0 && n <= 100 ? n : null;
+}
+
 const COMMANDS = new Set(['tick', 'kick', 'status', 'digest', 'pause', 'resume', 'repos', 'local-sync', 'labels', 'doctor', 'job', 'workspace', 'stack', 'heavy', 'pr-wait', 'ci-wait', 'review']);
 const RUNTIMES = /^(bun|node|nodejs|deno|bash|sh|zsh|python[\d.]*)$/;
 const RUNTIME_NAMES = /^(bun|node(?:-MainThread)?|nodejs|deno|bash|sh|zsh|python[\d.]*|agentctl(?:\.(?:ts|js|mjs|cjs))?)$/;
@@ -92,9 +101,9 @@ export function createAgentWorkflowMonitor({ procRoot = '/proc', run, now = Date
   }
 
   async function pipeline() {
-    const [status, config, state, paused, unitsRaw, files] = await Promise.all([
+    const [status, config, settings, state, paused, unitsRaw, files] = await Promise.all([
       readJson(path.join(workflowHome, 'status.json')), readJson(path.join(repoRoot, 'config.json')),
-      readJson(path.join(workflowHome, 'state.json')),
+      readJson(path.join(workflowHome, 'settings.json')), readJson(path.join(workflowHome, 'state.json')),
       stat(path.join(workflowHome, 'PAUSED')).then(() => true).catch((e) => e.code === 'ENOENT' ? false : null),
       run('systemctl', ['--user', 'show', 'agent-pump.service', 'agent-pump.timer', '--property=Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainExitTimestamp,LastTriggerUSec', '--no-pager']),
       readdir(path.join(workflowHome, 'jobs')).catch(() => null),
@@ -104,7 +113,7 @@ export function createAgentWorkflowMonitor({ procRoot = '/proc', run, now = Date
     const count = plansByDay && typeof plansByDay === 'object' && !Array.isArray(plansByDay)
       ? Object.hasOwn(plansByDay, day) ? plansByDay[day] : 0 : null;
     const launched = Number.isSafeInteger(count) && count >= 0 ? count : null;
-    const limit = Number.isSafeInteger(config?.maxPlansPerDay) && config.maxPlansPerDay >= 0 ? config.maxPlansPerDay : null;
+    const limit = ownerPlansPerDay(settings) ?? (Number.isSafeInteger(config?.maxPlansPerDay) && config.maxPlansPerDay >= 0 ? config.maxPlansPerDay : null);
     const dailyPlans = { day, launched, limit,
       remaining: launched != null && limit != null ? Math.max(0, limit - launched) : null,
       resetsAt: Date.parse(`${day}T00:00:00.000Z`) + 86_400_000 };
