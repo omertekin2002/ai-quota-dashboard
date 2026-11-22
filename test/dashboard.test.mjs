@@ -1647,7 +1647,7 @@ test('the Agent pipeline header has a Hide/Show details button that controls its
   const at = (marker) => { const i = html.indexOf(marker); assert.ok(i > 0, marker); return i; };
   const toggle = html.match(/<button[^>]* id="pipeline-toggle"[^>]*>/)[0];
   assert.match(toggle, /type="button"/);
-  assert.match(toggle, /aria-controls="plans-form pipeline-content"/);
+  assert.match(toggle, /aria-controls="plans-form reserve-form pipeline-content"/);
   assert.match(toggle, / hidden>/, 'hidden until there is a reading to collapse');
   assert.ok(at('id="pipeline-title"') < at('id="pipeline-toggle"') && at('id="pipeline-toggle"') < at('<div id="pipeline-content">'));
 });
@@ -1840,9 +1840,12 @@ test('the collapsed pipeline summary escapes problem text and never shows readin
 });
 
 // ---------- Plans per day (the pipeline's owner settings) ----------
-const settingsOf = (value = 12, plansToday = 3, configValue = 12) => ({
+const settingsOf = (value = 12, plansToday = 3, configValue = 12, reserve = 20) => ({
   version: 1, day: '2026-11-20', plansToday,
-  settings: { maxPlansPerDay: { value, configValue, overridden: value !== configValue, min: 0, max: 100, describe: 'plans' } },
+  settings: {
+    maxPlansPerDay: { value, configValue, overridden: value !== configValue, min: 0, max: 100, describe: 'plans' },
+    reservePct: { value: reserve, configValue: 20, overridden: reserve !== 20, min: 0, max: 100, describe: 'reserve' },
+  },
 });
 
 test('Plans per day shows the cap and today’s count, saves a new cap as JSON, and refuses bad numbers without a request', async () => {
@@ -1906,11 +1909,87 @@ test('Plans per day says when it can’t read or save the setting', async () => 
 test('Plans per day is part of the pipeline details: hidden with them, shown while there’s no reading to collapse', async () => {
   const quiet = await glancePage({ settings: settingsOf() }); // a healthy reading collapses the panel
   assert.equal(quiet.element('pipeline-content').hidden, true);
-  assert.equal(quiet.element('plans-form').hidden, true);
+  const forms = (page) => [page.element('plans-form').hidden, page.element('reserve-form').hidden];
+  assert.deepEqual(forms(quiet), [true, true]);
   quiet.element('pipeline-toggle').onclick();
-  assert.equal(quiet.element('plans-form').hidden, false);
+  assert.deepEqual(forms(quiet), [false, false]);
   quiet.element('pipeline-toggle').onclick();
-  assert.equal(quiet.element('plans-form').hidden, true);
+  assert.deepEqual(forms(quiet), [true, true]);
   const failed = await glancePage({ settings: settingsOf(), respond: (url) => (url.split('?')[0] === '/api/pipeline' ? { ok: false, status: 500, json: async () => ({}) } : undefined) });
-  assert.equal(failed.element('plans-form').hidden, false);
+  assert.deepEqual(forms(failed), [false, false]);
+});
+
+// ---------- Weekly reserve (the share of the Claude weekly limit the pump leaves alone) ----------
+const weekQuotas = (usedPct) => quotasOf(account('claude:a', [win('Weekly', usedPct, 3 * 86400, WEEK, { id: 'seven_day' })]));
+
+test('Weekly reserve says where the pump stops against the Claude week, saves as JSON, and refuses bad numbers', async () => {
+  const posts = [];
+  let current = settingsOf();
+  const page = await glancePage({
+    quotas: weekQuotas(70),
+    settings: (url, init) => {
+      if (init?.method === 'POST') { posts.push(JSON.parse(init.body)); current = settingsOf(12, 3, 12, JSON.parse(init.body).reservePct); }
+      return current;
+    },
+  });
+  const { element } = page;
+  assert.equal(element('weekly-reserve').value, 20);
+  assert.equal(element('weekly-reserve').disabled, false);
+  assert.equal(element('reserve-status').textContent, 'The pump stops at 80% of the Claude weekly limit · 70% used');
+
+  const submit = async (value) => {
+    element('weekly-reserve').value = value;
+    element('weekly-reserve').oninput();
+    await element('reserve-form').onsubmit({ preventDefault() {} });
+    await settle();
+  };
+  for (const bad of ['', '-1', '101', '12.5']) {
+    await submit(bad);
+    assert.match(element('reserve-status').textContent, /^Enter a whole number from 0 to 100/, bad);
+  }
+  assert.equal(posts.length, 0);
+
+  // Plans per day is untouched by a reserve save, and keeps a number being typed there.
+  element('plans-per-day').value = '9';
+  element('plans-per-day').oninput();
+  await submit('10');
+  assert.deepEqual(posts, [{ reservePct: 10 }]);
+  assert.equal(element('reserve-status').textContent, 'Saved: 10% reserved, from the pump’s next run · The pump stops at 90% of the Claude weekly limit · 70% used');
+  assert.equal(element('reserve-status').className.includes('healthy'), true);
+  assert.equal(element('plans-per-day').value, '9');
+
+  await page.run('loadPipelineSettings()');
+  element('weekly-reserve').oninput();
+  assert.equal(element('reserve-status').textContent, 'The pump stops at 90% of the Claude weekly limit · 70% used · config.json says 20');
+
+  current = settingsOf(12, 3, 12, 100);
+  element('weekly-reserve').value = '100';
+  await page.run('loadPipelineSettings()');
+  assert.match(element('reserve-status').textContent, /^The pump launches nothing while all of the week is reserved/);
+});
+
+test('Weekly reserve says the pump is waiting for the reset once Claude weekly use reaches its stop point', async () => {
+  const page = await glancePage({ quotas: weekQuotas(81), settings: settingsOf() });
+  assert.match(page.element('reserve-status').textContent, /^The pump stops at 80% of the Claude weekly limit · 81% used, so it’s waiting for the reset at .+$/);
+  // Without a Claude weekly reading it still names the stop point.
+  const none = await glancePage({ quotas: quotasOf(), settings: settingsOf() });
+  assert.equal(none.element('reserve-status').textContent, 'The pump stops at 80% of the Claude weekly limit · there’s no Claude reading, so it runs at most one worker on filed issues whatever the reserve');
+  // A reading the pump treats as too old: it says so instead of claiming the pump is waiting.
+  const old = weekQuotas(85);
+  old.accounts[0].fetchedAt = NOW - 3 * 3600_000;
+  old.accounts[0].stale = true;
+  const stale = await glancePage({ quotas: old, settings: settingsOf() });
+  assert.match(stale.element('reserve-status').textContent, /^The pump stops at 80% of the Claude weekly limit · the Claude reading is from .+, so it runs at most one worker on filed issues whatever the reserve$/);
+  assert.doesNotMatch(stale.element('reserve-status').textContent, /waiting/);
+  const noWeek = await glancePage({ quotas: quotasOf(account('claude:a', [win('5-hour', 20, 9000)])), settings: settingsOf() });
+  assert.match(noWeek.element('reserve-status').textContent, /there’s no Claude weekly reading/);
+});
+
+test('Weekly reserve is disabled, and Plans per day still works, when agentctl doesn’t know the setting yet', async () => {
+  const old = settingsOf();
+  delete old.settings.reservePct;
+  const page = await glancePage({ settings: old });
+  assert.equal(page.element('weekly-reserve').disabled, true);
+  assert.match(page.element('reserve-status').textContent, /needs a newer build-workflow/);
+  assert.equal(page.element('plans-per-day').disabled, false);
 });

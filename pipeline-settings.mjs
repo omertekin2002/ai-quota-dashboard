@@ -2,14 +2,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { command } from './workspace.mjs';
 
-// Owner settings of the agent pipeline (build-workflow), such as how many plans it may launch per day.
+// Owner settings of the agent pipeline (build-workflow): how many plans it may launch per day, and how much of the
+// weekly Claude limit it leaves for the owner.
 // `agentctl settings --json` reads them and `agentctl set <name> <value>` changes them; agentctl validates the
 // value and keeps them in ~/.agent-workflow/settings.json, which overrides the repo's config.json. Both commands
 // are local and quick (no GitHub), so they run per request rather than on a timer.
 const TIMEOUT_MS = 20_000;
 
 // Names the page may change. agentctl knows the ranges; these are checked here too so nothing else reaches it.
-export const SETTINGS = { maxPlansPerDay: { min: 0, max: 100 } };
+export const SETTINGS = { maxPlansPerDay: { min: 0, max: 100 }, reservePct: { min: 0, max: 100 } };
 
 export class SettingsInputError extends Error {}
 

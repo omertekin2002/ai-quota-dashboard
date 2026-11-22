@@ -27,13 +27,17 @@ test('settings are read and changed through agentctl, with arguments only (no sh
   assert.equal((await s.get()).settings.maxPlansPerDay.value, 12);
   assert.equal((await s.set({ maxPlansPerDay: 6 })).settings.maxPlansPerDay.value, 6);
   assert.deepEqual(calls, [['/bin/agentctl', 'settings', '--json'], ['/bin/agentctl', 'set', 'maxPlansPerDay', '6']]);
+  calls.length = 0;
+  await s.set({ reservePct: 15 });
+  assert.deepEqual(calls, [['/bin/agentctl', 'set', 'reservePct', '15']]);
 });
 
 test('bad values and unknown names never reach agentctl', async () => {
   const calls = [];
   const s = createPipelineSettings({ run: fakeRun(calls) });
   for (const body of [null, [], {}, { maxPlansPerDay: -1 }, { maxPlansPerDay: 101 }, { maxPlansPerDay: 2.5 }, { maxPlansPerDay: '6' },
-    { maxWorkers: 3 }, { maxPlansPerDay: 6, maxWorkers: 3 }, { __proto__: { maxPlansPerDay: 6 } }]) {
+    { maxWorkers: 3 }, { maxPlansPerDay: 6, maxWorkers: 3 }, { __proto__: { maxPlansPerDay: 6 } },
+    { reservePct: -1 }, { reservePct: 101 }, { reservePct: 12.5 }, { reservePct: '15' }, { 'quota.reservePct': 15 }]) {
     await assert.rejects(s.set(body), SettingsInputError, JSON.stringify(body));
   }
   assert.deepEqual(calls, []);

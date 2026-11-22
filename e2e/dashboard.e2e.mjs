@@ -123,7 +123,7 @@ function quietPipeline() {
 const test = base.extend({
   // A dashboard server on a free port, and helpers for the page under test.
   dash: async ({ page, context }, use) => {
-    const state = { quotas: quotasOf(), workspace: healthyWorkspace(), pipeline: pipelineOf(), failQuotas: false, maxPlansPerDay: 12, plansToday: 3 };
+    const state = { quotas: quotasOf(), workspace: healthyWorkspace(), pipeline: pipelineOf(), failQuotas: false, maxPlansPerDay: 12, reservePct: 20, plansToday: 3 };
     const calls = { quotas: [], workspace: [], pipeline: [], agentctl: [] };
     const logged = [];
     const server = createDashboardServer({
@@ -139,10 +139,10 @@ const test = base.extend({
       settings: createPipelineSettings({
         run: async (file, args) => {
           calls.agentctl.push(args);
-          if (args[0] === 'set') state.maxPlansPerDay = Number(args[2]);
-          const value = state.maxPlansPerDay;
+          if (args[0] === 'set') state[args[1]] = Number(args[2]);
+          const entry = (value, configValue, describe) => ({ value, configValue, overridden: value !== configValue, min: 0, max: 100, describe });
           return JSON.stringify({ version: 1, day: new Date().toISOString().slice(0, 10), plansToday: state.plansToday,
-            settings: { maxPlansPerDay: { value, configValue: 12, overridden: value !== 12, min: 0, max: 100, describe: 'plans' } } });
+            settings: { maxPlansPerDay: entry(state.maxPlansPerDay, 12, 'plans'), reservePct: entry(state.reservePct, 20, 'reserve') } });
         },
       }),
       log: (...args) => logged.push(args.map(String).join(' ')),
@@ -766,6 +766,32 @@ test('Plans per day: change the cap with the keyboard, see it saved and counted,
   await dash.reload();
   await expect(input).toHaveValue('5');
   await expect(status).toContainText('config.json says 12');
+  await expectNoSideScroll(page);
+});
+
+test('Weekly reserve: change it with the keyboard and see where the pump now stops, without sideways scroll', async ({ page, dash }) => {
+  await dash.open();
+  const input = page.locator('#weekly-reserve');
+  const status = page.locator('#reserve-status');
+  await expect(input).toHaveValue('20');
+  await expect(status).toContainText('The pump stops at 80% of the Claude weekly limit');
+  await expect(page.locator('label[for="weekly-reserve"]')).toBeVisible();
+  await expectNoSideScroll(page);
+
+  await input.fill('150');
+  await input.press('Enter');
+  await expect(status).toContainText('Enter a whole number from 0 to 100');
+  expect(dash.calls.agentctl.filter((a) => a[0] === 'set')).toEqual([]);
+
+  await input.fill('10');
+  await input.press('Enter');
+  await expect(status).toContainText('Saved: 10% reserved');
+  await expect(status).toContainText('The pump stops at 90%');
+  expect(dash.calls.agentctl.filter((a) => a[0] === 'set')).toEqual([['set', 'reservePct', '10']]);
+
+  await dash.reload();
+  await expect(input).toHaveValue('10');
+  await expect(status).toContainText('config.json says 20');
   await expectNoSideScroll(page);
 });
 

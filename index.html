@@ -353,13 +353,19 @@
     <div class="workspace-head">
       <h2 id="pipeline-title">Agent pipeline</h2>
       <div class="workspace-meta" id="pipeline-meta">Loading…</div>
-      <button type="button" class="disclosure" id="pipeline-toggle" aria-expanded="true" aria-controls="plans-form pipeline-content" hidden><span aria-hidden="true">▾</span> Hide details</button>
+      <button type="button" class="disclosure" id="pipeline-toggle" aria-expanded="true" aria-controls="plans-form reserve-form pipeline-content" hidden><span aria-hidden="true">▾</span> Hide details</button>
     </div>
     <form class="pipeline-settings" id="plans-form" novalidate>
       <label for="plans-per-day">Plans per day</label>
       <input id="plans-per-day" name="maxPlansPerDay" type="number" inputmode="numeric" min="0" max="100" step="1" disabled aria-describedby="plans-status">
       <button type="submit" id="plans-save" disabled>Save</button>
       <span class="settings-status" id="plans-status" role="status">Loading…</span>
+    </form>
+    <form class="pipeline-settings" id="reserve-form" novalidate>
+      <label for="weekly-reserve">Weekly reserve %</label>
+      <input id="weekly-reserve" name="reservePct" type="number" inputmode="numeric" min="0" max="100" step="1" disabled aria-describedby="reserve-status">
+      <button type="submit" id="reserve-save" disabled>Save</button>
+      <span class="settings-status" id="reserve-status" role="status">Loading…</span>
     </form>
     <div id="pipeline-content"><p class="workspace-note">Loading the pipeline overview…</p></div>
   </section>
@@ -1005,7 +1011,7 @@
     const p = pipeline, o = p?.overview;
     if (!p || !o) {
       pipelinePanel.show(true, false, 'pipeline-content'); // loading or unavailable: the body holds the only explanation
-      $('plans-form').hidden = false;
+      $('plans-form').hidden = $('reserve-form').hidden = false;
       $('pipeline-meta').innerHTML = pipelineError || p ? 'Unavailable' : 'Loading…';
       if (pipelineError || p) $('pipeline-content').innerHTML = `<p class="workspace-note warning">Pipeline overview unavailable${pipelineError ? ' (can’t reach the dashboard server)' : p?.error ? ` (${esc(p.error)})` : ''}. Retrying every minute.</p>`;
       return;
@@ -1015,7 +1021,7 @@
     const keys = [...attention.map(attentionKey), ...problems.flatMap((x) => x.keys || [x.key])];
     const open = pipelinePanel.expanded(keys, keys.length > 0);
     pipelinePanel.show(open, true, 'pipeline-content');
-    $('plans-form').hidden = !open;
+    $('plans-form').hidden = $('reserve-form').hidden = !open;
     const days = o.windowDays || 7;
     $('pipeline-meta').innerHTML = open
       ? esc(`${plural(repos.length, 'repo')} in scope · GitHub read ${p.fetchedAt ? ago(p.fetchedAt) : 'at an unknown time'} · refreshes every ${Math.round((p.refreshMs || 300_000) / 60_000)} min${p.refreshing ? ' · updating…' : ''}`)
@@ -1067,37 +1073,72 @@
   // The form sits outside #pipeline-content, so the minute-by-minute re-render never wipes what's being typed.
   // It's part of the panel's details: Hide details hides it with the rest (renderPipeline sets that).
   let pipelineSettings = null;
-  let settingsMessage = null; // { text, level } after a save, until the next edit
-  const plansInput = $('plans-per-day');
-  let plansDirty = false; // the owner has typed a number that isn't saved yet
   // The plan count resets at 00:00 UTC; say when that is in the viewer's own time.
   function nextUtcMidnight() {
     const now = new Date();
     return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
-  function renderPipelineSettings({ resetInput = false } = {}) {
-    const s = pipelineSettings?.settings?.maxPlansPerDay;
-    plansInput.disabled = $('plans-save').disabled = !s;
-    if (!s) {
-      $('plans-status').className = `settings-status${pipelineSettings === false ? ' warning' : ''}`;
-      $('plans-status').textContent = pipelineSettings === false ? 'Couldn’t read the pipeline settings. Retrying every minute.' : 'Loading…';
-      return;
+  // The Claude weekly window the pump paces against: the first Claude account's seven_day window, read with the same
+  // checks as build-workflow's assessQuota. Without a usable reading the pump ignores the reserve and runs one worker.
+  const PUMP_MAX_STALE_MS = 120 * 60_000; // build-workflow config.json quota.maxStaleMinutes
+  function claudeWeek() {
+    const a = data?.accounts?.find((x) => x.provider === 'claude');
+    const w = a?.windows?.find((x) => x.id === 'seven_day');
+    if (!a) return { unusable: 'there’s no Claude reading' };
+    if (a.fetchedAt && Date.now() - a.fetchedAt > PUMP_MAX_STALE_MS) return { unusable: `the Claude reading is from ${ago(a.fetchedAt)}` };
+    if (typeof w?.usedPct !== 'number' || !w.resetsAt || !w.windowSec) return { unusable: 'there’s no Claude weekly reading' };
+    return w.resetsAt <= Date.now() ? null : { w }; // past its reset: wait for the next reading
+  }
+  // One form per setting; each keeps what's typed and its own save message.
+  const SETTING_FORMS = [
+    {
+      name: 'maxPlansPerDay', form: 'plans-form', input: 'plans-per-day', save: 'plans-save', status: 'plans-status',
+      usage(s) {
+        const today = pipelineSettings.plansToday ?? 0;
+        const resets = `${nextUtcMidnight()} (00:00 UTC)`;
+        return today >= s.value
+          ? `${today} launched today: the cap is reached, so no new plans until ${resets}`
+          : `${today} of ${s.value} launched today · the count resets at ${resets}`;
+      },
+      saved: (v) => `Saved: ${v === 0 ? 'no new plans' : plural(v, 'plan')} per day, from the pump’s next run`,
+    },
+    {
+      name: 'reservePct', form: 'reserve-form', input: 'weekly-reserve', save: 'reserve-save', status: 'reserve-status',
+      usage(s) {
+        const stop = 100 - s.value, week = data ? claudeWeek() : null, w = week?.w;
+        const head = stop <= 0 ? 'The pump launches nothing while all of the week is reserved' : `The pump stops at ${stop}% of the Claude weekly limit`;
+        if (week?.unusable) return `${head} · ${week.unusable}, so it runs at most one worker on filed issues whatever the reserve`;
+        if (!w || stop <= 0) return head;
+        return w.usedPct >= stop
+          ? `${head} · ${w.usedPct}% used, so it’s waiting${w.resetsAt ? ` for the reset at ${fmtClock(w.resetsAt)}` : ''}`
+          : `${head} · ${w.usedPct}% used`;
+      },
+      saved: (v) => `Saved: ${v}% reserved, from the pump’s next run`,
+    },
+  ].map((f) => ({ ...f, dirty: false, message: null })); // dirty: a number is typed but not saved; message: after a save, until the next edit
+
+  function renderPipelineSettings({ resetInput = null } = {}) {
+    for (const f of SETTING_FORMS) {
+      const s = pipelineSettings?.settings?.[f.name], input = $(f.input), status = $(f.status);
+      input.disabled = $(f.save).disabled = !s;
+      if (!s) {
+        status.className = `settings-status${pipelineSettings !== null ? ' warning' : ''}`;
+        status.textContent = pipelineSettings === false ? 'Couldn’t read the pipeline settings. Retrying every minute.'
+          : pipelineSettings ? 'This setting needs a newer build-workflow (agentctl).' : 'Loading…';
+        continue;
+      }
+      input.min = s.min;
+      input.max = s.max;
+      // Don't overwrite a number the owner is typing.
+      if (resetInput === f.name || (document.activeElement !== input && !f.dirty)) {
+        input.value = s.value;
+        f.dirty = false;
+      }
+      const usage = f.usage(s);
+      const source = s.overridden ? ` · config.json says ${s.configValue}` : '';
+      status.className = `settings-status ${f.message?.level || ''}`;
+      status.textContent = f.message ? `${f.message.text} · ${usage}` : `${usage}${source}`;
     }
-    plansInput.min = s.min;
-    plansInput.max = s.max;
-    // Don't overwrite a number the owner is typing.
-    if (resetInput || (document.activeElement !== plansInput && !plansDirty)) {
-      plansInput.value = s.value;
-      plansDirty = false;
-    }
-    const today = pipelineSettings.plansToday ?? 0;
-    const resets = `${nextUtcMidnight()} (00:00 UTC)`;
-    const usage = today >= s.value
-      ? `${today} launched today: the cap is reached, so no new plans until ${resets}`
-      : `${today} of ${s.value} launched today · the count resets at ${resets}`;
-    const source = s.overridden ? ` · config.json says ${s.configValue}` : '';
-    $('plans-status').className = `settings-status ${settingsMessage?.level || ''}`;
-    $('plans-status').textContent = settingsMessage ? `${settingsMessage.text} · ${usage}` : `${usage}${source}`;
   }
   async function loadPipelineSettings() {
     try {
@@ -1109,35 +1150,38 @@
     }
     renderPipelineSettings();
   }
-  plansInput.oninput = () => {
-    plansDirty = true;
-    settingsMessage = null;
-    renderPipelineSettings();
-  };
-  $('plans-form').onsubmit = async (e) => {
-    e.preventDefault();
-    const s = pipelineSettings?.settings?.maxPlansPerDay;
-    if (!s) return;
-    const value = plansInput.value.trim() === '' ? NaN : Number(plansInput.value);
-    if (!Number.isInteger(value) || value < s.min || value > s.max) {
-      settingsMessage = { text: `Enter a whole number from ${s.min} to ${s.max}`, level: 'warning' };
-      return renderPipelineSettings();
-    }
-    $('plans-save').disabled = plansInput.disabled = true;
-    try {
-      const res = await fetch('/api/pipeline/settings', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxPlansPerDay: value }), signal: timeoutSignal(30_000),
-      });
-      const body = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
-      pipelineSettings = body;
-      settingsMessage = { text: `Saved: ${value === 0 ? 'no new plans' : plural(value, 'plan')} per day, from the pump’s next run`, level: 'healthy' };
-      renderPipelineSettings({ resetInput: true });
-    } catch (err) {
-      settingsMessage = { text: `Not saved (${err.message || 'can’t reach the dashboard server'})`, level: 'warning' };
+  for (const f of SETTING_FORMS) {
+    const input = $(f.input);
+    input.oninput = () => {
+      f.dirty = true;
+      f.message = null;
       renderPipelineSettings();
-    }
-  };
+    };
+    $(f.form).onsubmit = async (e) => {
+      e.preventDefault();
+      const s = pipelineSettings?.settings?.[f.name];
+      if (!s) return;
+      const value = input.value.trim() === '' ? NaN : Number(input.value);
+      if (!Number.isInteger(value) || value < s.min || value > s.max) {
+        f.message = { text: `Enter a whole number from ${s.min} to ${s.max}`, level: 'warning' };
+        return renderPipelineSettings();
+      }
+      $(f.save).disabled = input.disabled = true;
+      try {
+        const res = await fetch('/api/pipeline/settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [f.name]: value }), signal: timeoutSignal(30_000),
+        });
+        const body = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+        pipelineSettings = body;
+        f.message = { text: f.saved(value), level: 'healthy' };
+        renderPipelineSettings({ resetInput: f.name });
+      } catch (err) {
+        f.message = { text: `Not saved (${err.message || 'can’t reach the dashboard server'})`, level: 'warning' };
+        renderPipelineSettings();
+      }
+    };
+  }
 
   // Remember which repos are expanded across re-renders (toggle doesn't bubble, so listen while capturing).
   document.addEventListener('toggle', (e) => {
@@ -1473,6 +1517,7 @@
       version = (await versionReq) || version;
       loading = false;
       render();
+      renderPipelineSettings(); // the reserve line quotes this reading's Claude weekly use
     }
   }
 
