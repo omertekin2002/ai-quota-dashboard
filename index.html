@@ -254,6 +254,10 @@
   .pipeline-settings .settings-status { color: var(--ink-muted); font-size: 12px; }
   .pipeline-settings .settings-status.healthy { color: var(--healthy); }
   .pipeline-settings .settings-status.warning { color: var(--warning-ink); }
+  .settings-more { margin-top: 12px; font-size: 12.5px; color: var(--ink-2); }
+  .settings-more summary { cursor: pointer; font-weight: 600; color: var(--ink-1); width: fit-content; }
+  .settings-more summary:focus-visible { outline: 2px solid var(--fill); outline-offset: 2px; border-radius: 4px; }
+  .settings-more .pipeline-settings { margin-top: 8px; }
   .attention-group { margin: 10px 0 4px; font-size: 12px; font-weight: 600; color: var(--ink-muted); }
   .attention-list, .pipe-list { list-style: none; margin: 0; padding: 0; }
   .attention-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; padding: 8px 0; border-top: 1px solid var(--hairline); font-size: 13px; }
@@ -353,8 +357,9 @@
     <div class="workspace-head">
       <h2 id="pipeline-title">Agent pipeline</h2>
       <div class="workspace-meta" id="pipeline-meta">Loading…</div>
-      <button type="button" class="disclosure" id="pipeline-toggle" aria-expanded="true" aria-controls="plans-form reserve-form pipeline-content" hidden><span aria-hidden="true">▾</span> Hide details</button>
+      <button type="button" class="disclosure" id="pipeline-toggle" aria-expanded="true" aria-controls="pipeline-settings pipeline-content" hidden><span aria-hidden="true">▾</span> Hide details</button>
     </div>
+    <div id="pipeline-settings">
     <form class="pipeline-settings" id="plans-form" novalidate>
       <label for="plans-per-day">Plans per day</label>
       <input id="plans-per-day" name="maxPlansPerDay" type="number" inputmode="numeric" min="0" max="100" step="1" disabled aria-describedby="plans-status">
@@ -367,6 +372,58 @@
       <button type="submit" id="reserve-save" disabled>Save</button>
       <span class="settings-status" id="reserve-status" role="status">Loading…</span>
     </form>
+    <details class="settings-more" id="settings-more">
+      <summary>Worker and quota limits</summary>
+      <form class="pipeline-settings" id="maxWorkers-form" novalidate>
+        <label for="setting-maxWorkers">Agents at once</label>
+        <input id="setting-maxWorkers" name="maxWorkers" type="number" inputmode="numeric" step="1" disabled aria-describedby="maxWorkers-status">
+        <button type="submit" id="maxWorkers-save" disabled>Save</button>
+        <span class="settings-status" id="maxWorkers-status" role="status">Loading…</span>
+      </form>
+      <form class="pipeline-settings" id="maxConcurrentPlans-form" novalidate>
+        <label for="setting-maxConcurrentPlans">Planners at once</label>
+        <input id="setting-maxConcurrentPlans" name="maxConcurrentPlans" type="number" inputmode="numeric" step="1" disabled aria-describedby="maxConcurrentPlans-status">
+        <button type="submit" id="maxConcurrentPlans-save" disabled>Save</button>
+        <span class="settings-status" id="maxConcurrentPlans-status" role="status">Loading…</span>
+      </form>
+      <form class="pipeline-settings" id="fiveHourTightPct-form" novalidate>
+        <label for="setting-fiveHourTightPct">Slow down at 5-hour %</label>
+        <input id="setting-fiveHourTightPct" name="fiveHourTightPct" type="number" inputmode="numeric" step="1" disabled aria-describedby="fiveHourTightPct-status">
+        <button type="submit" id="fiveHourTightPct-save" disabled>Save</button>
+        <span class="settings-status" id="fiveHourTightPct-status" role="status">Loading…</span>
+      </form>
+      <form class="pipeline-settings" id="aheadOfPacePct-form" novalidate>
+        <label for="setting-aheadOfPacePct">Slow down when ahead of weekly pace by</label>
+        <input id="setting-aheadOfPacePct" name="aheadOfPacePct" type="number" inputmode="numeric" step="1" disabled aria-describedby="aheadOfPacePct-status">
+        <button type="submit" id="aheadOfPacePct-save" disabled>Save</button>
+        <span class="settings-status" id="aheadOfPacePct-status" role="status">Loading…</span>
+      </form>
+      <form class="pipeline-settings" id="fiveHourStopPct-form" novalidate>
+        <label for="setting-fiveHourStopPct">Stop at 5-hour %</label>
+        <input id="setting-fiveHourStopPct" name="fiveHourStopPct" type="number" inputmode="numeric" step="1" disabled aria-describedby="fiveHourStopPct-status">
+        <button type="submit" id="fiveHourStopPct-save" disabled>Save</button>
+        <span class="settings-status" id="fiveHourStopPct-status" role="status">Loading…</span>
+      </form>
+      <form class="pipeline-settings" id="maxStaleMinutes-form" novalidate>
+        <label for="setting-maxStaleMinutes">Quota reading too old after (min)</label>
+        <input id="setting-maxStaleMinutes" name="maxStaleMinutes" type="number" inputmode="numeric" step="1" disabled aria-describedby="maxStaleMinutes-status">
+        <button type="submit" id="maxStaleMinutes-save" disabled>Save</button>
+        <span class="settings-status" id="maxStaleMinutes-status" role="status">Loading…</span>
+      </form>
+      <form class="pipeline-settings" id="minFreeMemMb-form" novalidate>
+        <label for="setting-minFreeMemMb">Free RAM floor (MB)</label>
+        <input id="setting-minFreeMemMb" name="minFreeMemMb" type="number" inputmode="numeric" step="1" disabled aria-describedby="minFreeMemMb-status">
+        <button type="submit" id="minFreeMemMb-save" disabled>Save</button>
+        <span class="settings-status" id="minFreeMemMb-status" role="status">Loading…</span>
+      </form>
+      <form class="pipeline-settings" id="memPerWorkerMb-form" novalidate>
+        <label for="setting-memPerWorkerMb">RAM per new agent (MB)</label>
+        <input id="setting-memPerWorkerMb" name="memPerWorkerMb" type="number" inputmode="numeric" step="1" disabled aria-describedby="memPerWorkerMb-status">
+        <button type="submit" id="memPerWorkerMb-save" disabled>Save</button>
+        <span class="settings-status" id="memPerWorkerMb-status" role="status">Loading…</span>
+      </form>
+    </details>
+    </div>
     <div id="pipeline-content"><p class="workspace-note">Loading the pipeline overview…</p></div>
   </section>
   <section class="workspace" id="workspace" aria-labelledby="workspace-title">
@@ -1011,7 +1068,7 @@
     const p = pipeline, o = p?.overview;
     if (!p || !o) {
       pipelinePanel.show(true, false, 'pipeline-content'); // loading or unavailable: the body holds the only explanation
-      $('plans-form').hidden = $('reserve-form').hidden = false;
+      $('pipeline-settings').hidden = false;
       $('pipeline-meta').innerHTML = pipelineError || p ? 'Unavailable' : 'Loading…';
       if (pipelineError || p) $('pipeline-content').innerHTML = `<p class="workspace-note warning">Pipeline overview unavailable${pipelineError ? ' (can’t reach the dashboard server)' : p?.error ? ` (${esc(p.error)})` : ''}. Retrying every minute.</p>`;
       return;
@@ -1021,7 +1078,7 @@
     const keys = [...attention.map(attentionKey), ...problems.flatMap((x) => x.keys || [x.key])];
     const open = pipelinePanel.expanded(keys, keys.length > 0);
     pipelinePanel.show(open, true, 'pipeline-content');
-    $('plans-form').hidden = $('reserve-form').hidden = !open;
+    $('pipeline-settings').hidden = !open;
     const days = o.windowDays || 7;
     $('pipeline-meta').innerHTML = open
       ? esc(`${plural(repos.length, 'repo')} in scope · GitHub read ${p.fetchedAt ? ago(p.fetchedAt) : 'at an unknown time'} · refreshes every ${Math.round((p.refreshMs || 300_000) / 60_000)} min${p.refreshing ? ' · updating…' : ''}`)
@@ -1080,12 +1137,13 @@
   }
   // The Claude weekly window the pump paces against: the first Claude account's seven_day window, read with the same
   // checks as build-workflow's assessQuota. Without a usable reading the pump ignores the reserve and runs one worker.
-  const PUMP_MAX_STALE_MS = 120 * 60_000; // build-workflow config.json quota.maxStaleMinutes
+  // The pump's quota.maxStaleMinutes: the value in effect from agentctl, 120 (config.json's) until the settings load.
+  const pumpMaxStaleMs = () => (pipelineSettings?.settings?.maxStaleMinutes?.value ?? 120) * 60_000;
   function claudeWeek() {
     const a = data?.accounts?.find((x) => x.provider === 'claude');
     const w = a?.windows?.find((x) => x.id === 'seven_day');
     if (!a) return { unusable: 'there’s no Claude reading' };
-    if (a.fetchedAt && Date.now() - a.fetchedAt > PUMP_MAX_STALE_MS) return { unusable: `the Claude reading is from ${ago(a.fetchedAt)}` };
+    if (a.fetchedAt && Date.now() - a.fetchedAt > pumpMaxStaleMs()) return { unusable: `the Claude reading is from ${ago(a.fetchedAt)}` };
     if (typeof w?.usedPct !== 'number' || !w.resetsAt || !w.windowSec) return { unusable: 'there’s no Claude weekly reading' };
     return w.resetsAt <= Date.now() ? null : { w }; // past its reset: wait for the next reading
   }
@@ -1115,6 +1173,12 @@
       },
       saved: (v) => `Saved: ${v}% reserved, from the pump’s next run`,
     },
+    // Worker and quota limits: agentctl's own description of each, so the two can't disagree.
+    ...['maxWorkers', 'maxConcurrentPlans', 'fiveHourTightPct', 'aheadOfPacePct', 'fiveHourStopPct', 'maxStaleMinutes', 'minFreeMemMb', 'memPerWorkerMb'].map((name) => ({
+      name, form: `${name}-form`, input: `setting-${name}`, save: `${name}-save`, status: `${name}-status`,
+      usage: (s) => `${String(s.describe || '').replace(/^./, (c) => c.toUpperCase())} (${s.min}–${s.max})`,
+      saved: (v) => `Saved: ${v}, from the pump’s next run`,
+    })),
   ].map((f) => ({ ...f, dirty: false, message: null })); // dirty: a number is typed but not saved; message: after a save, until the next edit
 
   function renderPipelineSettings({ resetInput = null } = {}) {

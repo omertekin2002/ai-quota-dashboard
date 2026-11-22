@@ -123,7 +123,7 @@ function quietPipeline() {
 const test = base.extend({
   // A dashboard server on a free port, and helpers for the page under test.
   dash: async ({ page, context }, use) => {
-    const state = { quotas: quotasOf(), workspace: healthyWorkspace(), pipeline: pipelineOf(), failQuotas: false, maxPlansPerDay: 12, reservePct: 20, plansToday: 3 };
+    const state = { quotas: quotasOf(), workspace: healthyWorkspace(), pipeline: pipelineOf(), failQuotas: false, maxPlansPerDay: 12, reservePct: 20, maxWorkers: 5, plansToday: 3 };
     const calls = { quotas: [], workspace: [], pipeline: [], agentctl: [] };
     const logged = [];
     const server = createDashboardServer({
@@ -142,7 +142,11 @@ const test = base.extend({
           if (args[0] === 'set') state[args[1]] = Number(args[2]);
           const entry = (value, configValue, describe) => ({ value, configValue, overridden: value !== configValue, min: 0, max: 100, describe });
           return JSON.stringify({ version: 1, day: new Date().toISOString().slice(0, 10), plansToday: state.plansToday,
-            settings: { maxPlansPerDay: entry(state.maxPlansPerDay, 12, 'plans'), reservePct: entry(state.reservePct, 20, 'reserve') } });
+            settings: {
+              maxPlansPerDay: entry(state.maxPlansPerDay, 12, 'plans'), reservePct: entry(state.reservePct, 20, 'reserve'),
+              maxWorkers: { ...entry(state.maxWorkers, 5, 'agents running at once when quota is normal (0 = launch nothing)'), max: 10 },
+              maxStaleMinutes: { ...entry(120, 120, 'minutes before a quota reading counts as missing'), min: 10, max: 1440 },
+            } });
         },
       }),
       log: (...args) => logged.push(args.map(String).join(' ')),
@@ -792,6 +796,34 @@ test('Weekly reserve: change it with the keyboard and see where the pump now sto
   await dash.reload();
   await expect(input).toHaveValue('10');
   await expect(status).toContainText('config.json says 20');
+  await expectNoSideScroll(page);
+});
+
+test('Worker and quota limits: open the group, change Agents at once, and see it saved, without sideways scroll', async ({ page, dash }) => {
+  await dash.open();
+  const group = page.locator('#settings-more');
+  const input = page.locator('#setting-maxWorkers');
+  const status = page.locator('#maxWorkers-status');
+  await expect(input).toBeHidden(); // closed until asked for
+  await group.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(input).toBeVisible();
+  await expect(input).toHaveValue('5');
+  await expect(status).toContainText('Agents running at once when quota is normal');
+  await expect(page.locator('#setting-maxStaleMinutes')).toHaveValue('120');
+  // A setting this agentctl doesn't report stays disabled and says why.
+  await expect(page.locator('#setting-memPerWorkerMb')).toBeDisabled();
+  await expect(page.locator('#memPerWorkerMb-status')).toContainText('needs a newer build-workflow');
+  await expectNoSideScroll(page);
+
+  await input.fill('3');
+  await input.press('Enter');
+  await expect(status).toContainText('Saved: 3');
+  expect(dash.calls.agentctl.filter((a) => a[0] === 'set')).toEqual([['set', 'maxWorkers', '3']]);
+  await dash.reload();
+  await page.locator('#settings-more summary').click();
+  await expect(input).toHaveValue('3');
+  await expect(status).toContainText('config.json says 5');
   await expectNoSideScroll(page);
 });
 

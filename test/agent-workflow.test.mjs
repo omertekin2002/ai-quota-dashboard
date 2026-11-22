@@ -103,6 +103,21 @@ test('daily plans use the pump launch counter and configured limit, and roll ove
   assert.deepEqual((await monitor()).dailyPlans, { day: '2026-10-27', launched: 0, limit: 42, remaining: 42, resetsAt: Date.parse('2026-10-28T00:00:00Z') });
 });
 
+test('daily plans use the owner override from agentctl set over config.json, unless agentctl would ignore it', async (t) => {
+  const f = await setup(t);
+  await f.file('repo/config.json', { maxPlansPerDay: 12 });
+  await f.file('workflow/state.json', { plansByDay: { '1970-01-01': 30 } });
+  const monitor = createAgentWorkflowMonitor({ ...f.options, run: async () => null });
+  await f.file('workflow/settings.json', { maxPlansPerDay: 60, reservePct: 0 });
+  assert.deepEqual([(await monitor()).dailyPlans.limit, (await monitor()).dailyPlans.remaining], [60, 30]);
+  await f.file('workflow/settings.json', { maxPlansPerDay: ' 40 ' }); // agentctl accepts a string of digits too
+  assert.equal((await monitor()).dailyPlans.limit, 40);
+  for (const bad of [{ maxPlansPerDay: 101 }, { maxPlansPerDay: '6x' }, { maxPlansPerDay: 2.5 }, {}, 'not json']) {
+    await f.file('workflow/settings.json', bad);
+    assert.equal((await monitor()).dailyPlans.limit, 12, JSON.stringify(bad));
+  }
+});
+
 test('daily plans preserve unavailable readings and handle zero or exceeded limits', async (t) => {
   const f = await setup(t);
   const monitor = createAgentWorkflowMonitor({ ...f.options, run: async () => null });

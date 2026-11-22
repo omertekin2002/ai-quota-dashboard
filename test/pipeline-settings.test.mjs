@@ -29,14 +29,16 @@ test('settings are read and changed through agentctl, with arguments only (no sh
   assert.deepEqual(calls, [['/bin/agentctl', 'settings', '--json'], ['/bin/agentctl', 'set', 'maxPlansPerDay', '6']]);
   calls.length = 0;
   await s.set({ reservePct: 15 });
-  assert.deepEqual(calls, [['/bin/agentctl', 'set', 'reservePct', '15']]);
+  await s.set({ maxWorkers: 3 });
+  assert.deepEqual(calls, [['/bin/agentctl', 'set', 'reservePct', '15'], ['/bin/agentctl', 'set', 'maxWorkers', '3']]);
 });
 
 test('bad values and unknown names never reach agentctl', async () => {
   const calls = [];
   const s = createPipelineSettings({ run: fakeRun(calls) });
   for (const body of [null, [], {}, { maxPlansPerDay: -1 }, { maxPlansPerDay: 101 }, { maxPlansPerDay: 2.5 }, { maxPlansPerDay: '6' },
-    { maxWorkers: 3 }, { maxPlansPerDay: 6, maxWorkers: 3 }, { __proto__: { maxPlansPerDay: 6 } },
+    { staleMinutes: 3 }, { maxPlansPerDay: 6, staleMinutes: 3 }, { __proto__: { maxPlansPerDay: 6 } },
+    { maxWorkers: 11 }, { maxWorkers: -1 }, { maxStaleMinutes: 5 }, { memPerWorkerMb: 0 }, { minFreeMemMb: 8001 }, { toString: 1 }, { constructor: 1 },
     { reservePct: -1 }, { reservePct: 101 }, { reservePct: 12.5 }, { reservePct: '15' }, { 'quota.reservePct': 15 }]) {
     await assert.rejects(s.set(body), SettingsInputError, JSON.stringify(body));
   }
@@ -101,7 +103,7 @@ test('writes from other sites, forms, other hosts or with bad bodies are refused
     [415, { headers: { ...ok, 'Content-Type': 'text/plain' }, body }],
     [400, { headers: ok, body: '{not json' }],
     [400, { headers: ok, body: JSON.stringify({ maxPlansPerDay: 400 }) }],
-    [400, { headers: ok, body: JSON.stringify({ maxWorkers: 2 }) }],
+    [400, { headers: ok, body: JSON.stringify({ staleMinutes: 2 }) }],
     [413, { headers: ok, body: JSON.stringify({ maxPlansPerDay: 4, pad: 'x'.repeat(10_000) }) }],
     [403, { headers: ok, body, host: 'evil.example' }], // the Host check still comes first
   ];

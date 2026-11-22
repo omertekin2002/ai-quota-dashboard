@@ -1647,7 +1647,7 @@ test('the Agent pipeline header has a Hide/Show details button that controls its
   const at = (marker) => { const i = html.indexOf(marker); assert.ok(i > 0, marker); return i; };
   const toggle = html.match(/<button[^>]* id="pipeline-toggle"[^>]*>/)[0];
   assert.match(toggle, /type="button"/);
-  assert.match(toggle, /aria-controls="plans-form reserve-form pipeline-content"/);
+  assert.match(toggle, /aria-controls="pipeline-settings pipeline-content"/);
   assert.match(toggle, / hidden>/, 'hidden until there is a reading to collapse');
   assert.ok(at('id="pipeline-title"') < at('id="pipeline-toggle"') && at('id="pipeline-toggle"') < at('<div id="pipeline-content">'));
 });
@@ -1845,8 +1845,16 @@ const settingsOf = (value = 12, plansToday = 3, configValue = 12, reserve = 20) 
   settings: {
     maxPlansPerDay: { value, configValue, overridden: value !== configValue, min: 0, max: 100, describe: 'plans' },
     reservePct: { value: reserve, configValue: 20, overridden: reserve !== 20, min: 0, max: 100, describe: 'reserve' },
+    ...limits,
   },
 });
+const LIMIT = (value, configValue, min, max, describe) => ({ value, configValue, overridden: value !== configValue, min, max, describe });
+const limits = {
+  maxWorkers: LIMIT(5, 5, 0, 10, 'agents running at once when quota is normal (0 = launch nothing)'),
+  maxConcurrentPlans: LIMIT(1, 1, 0, 10, 'planners running at once'),
+  fiveHourTightPct: LIMIT(70, 70, 0, 100, 'tight'), aheadOfPacePct: LIMIT(10, 10, 0, 100, 'ahead'), fiveHourStopPct: LIMIT(90, 90, 0, 100, 'stop'),
+  maxStaleMinutes: LIMIT(120, 120, 10, 1440, 'stale'), minFreeMemMb: LIMIT(1500, 1500, 0, 8000, 'floor'), memPerWorkerMb: LIMIT(500, 500, 100, 4000, 'per agent'),
+};
 
 test('Plans per day shows the cap and today’s count, saves a new cap as JSON, and refuses bad numbers without a request', async () => {
   const posts = [];
@@ -1909,14 +1917,52 @@ test('Plans per day says when it can’t read or save the setting', async () => 
 test('Plans per day is part of the pipeline details: hidden with them, shown while there’s no reading to collapse', async () => {
   const quiet = await glancePage({ settings: settingsOf() }); // a healthy reading collapses the panel
   assert.equal(quiet.element('pipeline-content').hidden, true);
-  const forms = (page) => [page.element('plans-form').hidden, page.element('reserve-form').hidden];
-  assert.deepEqual(forms(quiet), [true, true]);
+  const forms = (page) => page.element('pipeline-settings').hidden;
+  assert.equal(forms(quiet), true);
   quiet.element('pipeline-toggle').onclick();
-  assert.deepEqual(forms(quiet), [false, false]);
+  assert.equal(forms(quiet), false);
   quiet.element('pipeline-toggle').onclick();
-  assert.deepEqual(forms(quiet), [true, true]);
+  assert.equal(forms(quiet), true);
   const failed = await glancePage({ settings: settingsOf(), respond: (url) => (url.split('?')[0] === '/api/pipeline' ? { ok: false, status: 500, json: async () => ({}) } : undefined) });
-  assert.deepEqual(forms(failed), [false, false]);
+  assert.equal(forms(failed), false);
+});
+
+test('every worker and quota limit has a labelled field that agentctl describes, and saves only its own name', async () => {
+  const names = Object.keys(limits);
+  for (const n of names) {
+    assert.match(html, new RegExp(`<label for="setting-${n}">[^<]+</label>`), n);
+    assert.ok(html.indexOf(`id="${n}-form"`) > html.indexOf('<details class="settings-more"'), `${n} sits in Worker and quota limits`);
+  }
+  const posts = [];
+  let current = settingsOf();
+  const page = await glancePage({
+    settings: (url, init) => {
+      if (init?.method === 'POST') {
+        const body = JSON.parse(init.body);
+        posts.push(body);
+        current = settingsOf();
+        current.settings.maxWorkers = LIMIT(body.maxWorkers, 5, 0, 10, limits.maxWorkers.describe);
+      }
+      return current;
+    },
+  });
+  const { element } = page;
+  assert.equal(element('setting-maxWorkers').value, 5);
+  assert.equal(element('setting-maxWorkers').disabled, false);
+  assert.equal(element('maxWorkers-status').textContent, 'Agents running at once when quota is normal (0 = launch nothing) (0–10)');
+  assert.equal(element('setting-maxStaleMinutes').min, 10);
+  element('setting-maxWorkers').value = '11';
+  await element('maxWorkers-form').onsubmit({ preventDefault() {} });
+  assert.match(element('maxWorkers-status').textContent, /^Enter a whole number from 0 to 10/);
+  element('setting-maxWorkers').value = '3';
+  element('setting-maxWorkers').oninput();
+  await element('maxWorkers-form').onsubmit({ preventDefault() {} });
+  await settle();
+  assert.deepEqual(posts, [{ maxWorkers: 3 }]);
+  assert.equal(element('maxWorkers-status').textContent, 'Saved: 3, from the pump’s next run · Agents running at once when quota is normal (0 = launch nothing) (0–10)');
+  await page.run('loadPipelineSettings()');
+  element('setting-maxWorkers').oninput(); // the saved message lasts until the next edit
+  assert.match(element('maxWorkers-status').textContent, /config\.json says 5$/);
 });
 
 // ---------- Weekly reserve (the share of the Claude weekly limit the pump leaves alone) ----------
@@ -1981,6 +2027,11 @@ test('Weekly reserve says the pump is waiting for the reset once Claude weekly u
   const stale = await glancePage({ quotas: old, settings: settingsOf() });
   assert.match(stale.element('reserve-status').textContent, /^The pump stops at 80% of the Claude weekly limit · the Claude reading is from .+, so it runs at most one worker on filed issues whatever the reserve$/);
   assert.doesNotMatch(stale.element('reserve-status').textContent, /waiting/);
+  // The pump's staleness limit is a setting: with 240 minutes, a 3-hour-old reading still counts.
+  const lenient = settingsOf();
+  lenient.settings.maxStaleMinutes = LIMIT(240, 120, 10, 1440, 'stale');
+  const usable = await glancePage({ quotas: old, settings: lenient });
+  assert.match(usable.element('reserve-status').textContent, /^The pump stops at 80% of the Claude weekly limit · 85% used, so it’s waiting/);
   const noWeek = await glancePage({ quotas: quotasOf(account('claude:a', [win('5-hour', 20, 9000)])), settings: settingsOf() });
   assert.match(noWeek.element('reserve-status').textContent, /there’s no Claude weekly reading/);
 });
