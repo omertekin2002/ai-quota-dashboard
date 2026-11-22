@@ -246,7 +246,7 @@
   .pipeline-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 12px; font-size: 12.5px; color: var(--ink-2); }
   .pipeline-settings label { font-weight: 600; color: var(--ink-1); }
   .pipeline-settings input {
-    font: inherit; font-size: 13px; width: 4.5em; color: var(--ink-1); background: var(--surface);
+    font: inherit; font-size: 13px; width: 5.5em; color: var(--ink-1); background: var(--surface);
     border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-variant-numeric: tabular-nums;
   }
   .pipeline-settings input:focus-visible { outline: 2px solid var(--fill); outline-offset: 2px; }
@@ -393,7 +393,7 @@
         <span class="settings-status" id="fiveHourTightPct-status" role="status">Loading…</span>
       </form>
       <form class="pipeline-settings" id="aheadOfPacePct-form" novalidate>
-        <label for="setting-aheadOfPacePct">Slow down when ahead of weekly pace by</label>
+        <label for="setting-aheadOfPacePct">Slow down ahead of pace by</label>
         <input id="setting-aheadOfPacePct" name="aheadOfPacePct" type="number" inputmode="numeric" step="1" disabled aria-describedby="aheadOfPacePct-status">
         <button type="submit" id="aheadOfPacePct-save" disabled>Save</button>
         <span class="settings-status" id="aheadOfPacePct-status" role="status">Loading…</span>
@@ -405,7 +405,7 @@
         <span class="settings-status" id="fiveHourStopPct-status" role="status">Loading…</span>
       </form>
       <form class="pipeline-settings" id="maxStaleMinutes-form" novalidate>
-        <label for="setting-maxStaleMinutes">Quota reading too old after (min)</label>
+        <label for="setting-maxStaleMinutes">Reading too old after (min)</label>
         <input id="setting-maxStaleMinutes" name="maxStaleMinutes" type="number" inputmode="numeric" step="1" disabled aria-describedby="maxStaleMinutes-status">
         <button type="submit" id="maxStaleMinutes-save" disabled>Save</button>
         <span class="settings-status" id="maxStaleMinutes-status" role="status">Loading…</span>
