@@ -88,6 +88,10 @@
   .fresh { margin-left: auto; font-size: 12px; color: var(--ink-muted); white-space: nowrap; }
   .fresh.stale { color: var(--warning-ink); }
   .card-error { color: var(--ink-2); font-size: 13px; padding: 12px 0; }
+  .card-limits { color: var(--ink-2); font-size: 12.5px; padding: 10px 0 2px; overflow-wrap: anywhere; }
+  .card-limits strong { color: var(--ink-1); font-variant-numeric: tabular-nums; }
+  .card-limits .warning { color: var(--warning-ink); }
+  .card-limits .critical { color: var(--critical-ink); }
   .card-note { color: var(--ink-muted); font-size: 12.5px; padding: 10px 0 12px; overflow-wrap: anywhere; }
   .card-error code, .empty code { font-size: 12px; background: var(--hairline); padding: 1px 5px; border-radius: 4px; }
 
@@ -103,6 +107,7 @@
   .status { margin-left: auto; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
   .status.warning { color: var(--warning-ink); }
   .status.critical { color: var(--critical-ink); }
+  .pending { font-size: 15px; font-weight: 600; color: var(--ink-2); line-height: 1.3; padding: 7px 0 6px; }
 
   .meter { --c: var(--fill); position: relative; height: 8px; border-radius: 4px;
     background: color-mix(in oklab, var(--c) 20%, var(--surface)); }
@@ -1151,7 +1156,73 @@
   // A reading shown after a failed update, or one too old to trust, says how old it is.
   const glanceAge = (at, failed) => glanceNote(`${failed ? "⚠ Couldn't refresh · " : ''}◷ ${at != null ? ago(at) : 'time unknown'}`, 'warning');
 
-  // One line per account: its tightest known window. Accounts are never summed or compared with each other.
+  // ---------- limits: each account's binding window within each scope ----------
+  // A window's `scope` is null when it limits the whole account, else the model, family or feature it alone limits.
+  // A reading saved before the API had `scope` gets one from its label: the first part that isn't a cadence
+  // ("Weekly · Opus" → Opus, "Gemini · Weekly" → Gemini, "5-hour" → the whole account).
+  const CADENCE = /^(\d+-(min|hour|day)|weekly|monthly|daily|quota|reported quota)$/i;
+  function scopeOf(w) {
+    if (w.scope === null || (typeof w.scope === 'string' && w.scope.trim())) return w.scope;
+    return String(w.label ?? '').split(' · ').map((s) => s.trim()).find((s) => s && !CADENCE.test(s)) ?? null;
+  }
+  // The window's label without its scope, so a scope line reads "Gemini: Weekly …", not "Gemini: Gemini · Weekly …".
+  const labelIn = (w, scope) => String(w.label ?? '').split(' · ').filter((s) => s.trim() !== scope).join(' · ');
+
+  // Groups the account's windows by scope and picks each group's limiter: the window with the least `left` among
+  // those with a current figure. Reset-due windows are never a limiter, only counted as pending. Account-wide
+  // windows bind every named scope too, so a named scope is shown only when its limiter is tighter than the
+  // account-wide one (or the account-wide one has no current figure). With no account-wide window, every scope shows.
+  // Scopes are only ever compared within one account.
+  function limits(a, now) {
+    const groups = new Map();
+    for (const w of a.windows || []) {
+      const scope = scopeOf(w);
+      if (!groups.has(scope)) groups.set(scope, { scope, limiter: null, pending: 0 });
+      const g = groups.get(scope), v = view(w, now);
+      if (v.resetPassed) g.pending++;
+      else if (v.left != null && (!g.limiter || v.left < g.limiter.v.left)) g.limiter = { w, v };
+    }
+    const wide = groups.get(null) ?? null;
+    groups.delete(null);
+    const named = [...groups.values()];
+    const bound = wide?.limiter?.v.left;
+    const scopes = named.filter((g) => (bound == null ? true : g.limiter != null && g.limiter.v.left < bound));
+    // Tightest first; then reset-due, then can't tell, each in the order the provider listed them.
+    const rank = (g) => (g.limiter ? 0 : g.pending ? 1 : 2);
+    scopes.sort((x, y) => rank(x) - rank(y) || (x.limiter && y.limiter ? x.limiter.v.left - y.limiter.v.left : 0));
+    const hiddenPending = named.filter((g) => !scopes.includes(g)).reduce((n, g) => n + g.pending, 0);
+    return { wide, scopes, hiddenPending };
+  }
+
+  // One group's figure: "<label> N% left · resets in … ⚠ Low", reset-due, or can't tell. Never 0% or 100% for unknowns.
+  function limitText(g, label, extraPending = 0, sep = ' ') {
+    const pending = g.pending + extraPending;
+    if (!g.limiter) return g.pending ? `<strong>${RESET_DUE}</strong>` : "<strong>—</strong> can't tell";
+    const { w, v } = g.limiter, st = statusLabel(v);
+    const when = v.notStarted || v.toReset == null ? resetText(w, v) : `resets in ${fmtDur(v.toReset)}`;
+    const note = pending ? ` · ${plural(pending, 'reset', 'resets')} awaiting confirmation` : '';
+    return `${label ? `${esc(label)}${sep}` : ''}<strong>${pctText(v.left)}</strong> left${when ? ` · ${esc(when)}` : ''}${note}${st ? ` <span class="${st.cls}">${st.text}</span>` : ''}`;
+  }
+
+  // The lines the Capacity tile and the card share: the account-wide limiter first (when the account has one),
+  // then one line per shown scope. `max` caps the scope lines and adds "+N more".
+  function limitLines(a, now, max = Infinity) {
+    const { wide, scopes, hiddenPending } = limits(a, now);
+    const lines = [];
+    if (!wide && !scopes.length) {
+      lines.push(`<strong>—</strong> ${a.windows?.length ? 'Usage unknown' : a.error ? "Couldn't read usage" : 'No limits reported'}`);
+    } else if (wide) {
+      lines.push(wide.limiter ? `Limited by ${limitText(wide, wide.limiter.w.label, hiddenPending, ' · ')}`
+        : wide.pending ? `<strong>${RESET_DUE}</strong>` : '<strong>—</strong> Usage unknown');
+    }
+    for (const g of scopes.slice(0, max)) lines.push(`${esc(g.scope)}: ${limitText(g, g.limiter ? labelIn(g.limiter.w, g.scope) : '')}`);
+    if (scopes.length > max) lines.push(`+${scopes.length - max} more`);
+    return lines;
+  }
+
+  // One row per account: its account-wide limiter and any tighter scope, each on its own line.
+  // Accounts are never summed or compared with each other.
+  const GLANCE_SCOPES = 3;
   function renderCapacityGlance() {
     const now = Date.now();
     const failed = quotaError ? glanceNote("⚠ Couldn't refresh", 'warning') : '';
@@ -1160,19 +1231,12 @@
       return;
     }
     const rows = data.accounts.map((a) => {
-      const known = (a.windows || []).map((w) => ({ w, v: view(w, now) })).filter(({ v }) => !v.unknown);
-      const tight = known.reduce((min, x) => (!min || x.v.left < min.v.left ? x : min), null);
-      let what;
-      if (!tight) what = `<strong>—</strong> ${a.windows?.length ? 'Usage unknown' : a.error ? "Couldn't read usage" : 'No limits reported'}`;
-      else {
-        const { w, v } = tight, st = statusLabel(v);
-        const when = v.resetPassed ? footText(v, a.stale).text : v.notStarted || v.toReset == null ? resetText(w, v) : `resets in ${fmtDur(v.toReset)}`;
-        what = `${esc(w.label)} <strong>${pctText(v.left)}</strong> left${when ? ` · ${esc(when)}` : ''}${st ? ` <span class="${st.cls}">${st.text}</span>` : ''}`;
-      }
+      const lines = limitLines(a, now, GLANCE_SCOPES);
       // The same reading age the card shows instead of ● Live.
-      const age = a.stale ? a.fetchedAt : quotaError && !a.error ? readingAt(a) : null;
+      const age = shownAge(a);
+      if (age != null) lines[0] += ` <span class="warning">◷ ${esc(ago(age))}</span>`;
       return `<li class="glance-row"><div class="glance-who"><strong>${esc(a.name)}${a.plan ? ` ${esc(a.plan)}` : ''}</strong>${a.email ? ` · ${esc(a.email)}` : ''}</div>
-        <div class="glance-what">${what}${age != null ? ` <span class="warning">◷ ${esc(ago(age))}</span>` : ''}</div></li>`;
+        ${lines.map((l) => `<div class="glance-what">${l}</div>`).join('')}</li>`;
     });
     $('glance-capacity').innerHTML = rows.length ? `<ul class="glance-list">${rows.join('')}</ul>${failed}` : `${glanceNote('No Claude, ChatGPT or Antigravity logins found')}${failed}`;
   }
@@ -1228,17 +1292,22 @@
 
   // Derive everything the UI shows about one window at the current moment.
   // An unreadable usage figure stays unknown (left/used null, no level or projection), never "100% left".
+  // A window whose reset time has passed is reset-due: an elapsed countdown doesn't prove the allowance came back,
+  // so it has no current figure, level or projection until a provider reports the window again. The reading it
+  // replaces is kept as `previousUsed`, for the details only.
+  const RESET_DUE = 'Reset due · awaiting confirmation';
   function view(w, now) {
-    let used = Number.isFinite(w.usedPct) ? w.usedPct : null;
-    let resetPassed = false;
-    if (w.resetsAt && w.resetsAt <= now) { used = 0; resetPassed = true; }
-    const toReset = w.resetsAt && !resetPassed ? (w.resetsAt - now) / 1000 : null;
+    const used = Number.isFinite(w.usedPct) ? w.usedPct : null;
+    if (w.resetsAt && w.resetsAt <= now) {
+      return { used: null, left: null, resetPassed: true, previousUsed: used, toReset: null, notStarted: false, timeLeftPct: null, projectedLeft: null, runsOutIn: null, level: null };
+    }
+    const toReset = w.resetsAt ? (w.resetsAt - now) / 1000 : null;
     if (used == null) {
       const timeLeftPct = toReset != null && w.windowSec ? Math.max(0, Math.min(100, (toReset / w.windowSec) * 100)) : null;
-      return { used: null, left: null, unknown: true, toReset, notStarted: false, resetPassed, timeLeftPct, projectedLeft: null, runsOutIn: null, level: null };
+      return { used: null, left: null, unknown: true, toReset, notStarted: false, resetPassed: false, timeLeftPct, projectedLeft: null, runsOutIn: null, level: null };
     }
     const left = Math.max(0, Math.min(100, 100 - used));
-    const notStarted = !resetPassed && used <= 0 && toReset != null && w.windowSec && toReset >= w.windowSec - 120;
+    const notStarted = used <= 0 && toReset != null && w.windowSec && toReset >= w.windowSec - 120;
     let timeLeftPct = null, projectedLeft = null, runsOutIn = null;
     if (toReset != null && w.windowSec && !notStarted) {
       timeLeftPct = Math.max(0, Math.min(100, (toReset / w.windowSec) * 100));
@@ -1250,11 +1319,11 @@
       }
     }
     const level = left <= 10 ? 'critical' : left <= 30 ? 'warning' : null;
-    return { used, left, toReset, notStarted, resetPassed, timeLeftPct, projectedLeft, runsOutIn, level };
+    return { used, left, toReset, notStarted, resetPassed: false, timeLeftPct, projectedLeft, runsOutIn, level };
   }
 
   function statusLabel(v) {
-    if (v.unknown) return null;
+    if (v.unknown || v.resetPassed) return null;
     if (v.left <= 0) return { cls: 'critical', text: '⛔ Limit reached' };
     if (v.level === 'critical') return { cls: 'critical', text: '⛔ Nearly out' };
     if (v.level === 'warning') return { cls: 'warning', text: '⚠ Low' };
@@ -1262,7 +1331,7 @@
   }
 
   function resetText(w, v) {
-    if (v.resetPassed) return 'reset since last reading';
+    if (v.resetPassed) return `reset due ${ago(w.resetsAt)}`;
     if (v.notStarted) return 'starts on first use';
     if (v.toReset == null) return w.resetUnknown ? 'Reset time unavailable' : w.windowSec ? '' : 'resets with billing cycle';
     return `resets in ${fmtDur(v.toReset)} · ${fmtClock(w.resetsAt)}`;
@@ -1270,10 +1339,11 @@
 
   const pctText = (n) => (n == null ? '—' : `${Math.round(n)}%`);
 
-  // Stale accounts get no automatic reload (see render()), so their footer must not promise one.
-  function footText(v, stale) {
+  // Stale accounts get no automatic reload (see render()), and none runs while loads fail, so with a reading
+  // `age` (see shownAge()) a reset-due footer gives that age instead of promising a refresh.
+  function footText(v, age = null) {
     if (v.unknown) return { text: 'Usage unknown' };
-    if (v.resetPassed) return { text: stale ? 'Estimated: reset since this reading' : 'Estimated. Refreshing…' };
+    if (v.resetPassed) return { text: age != null ? `Last reading ${ago(age)}` : 'Refreshing…' };
     if (v.notStarted) return { text: 'Unused. The window starts when you send your first request.' };
     if (v.runsOutIn != null) return { text: `⚠ At this pace it runs out in ${fmtDur(v.runsOutIn)}, before the reset`, warn: true };
     if (v.projectedLeft != null) return { text: `At this pace, about ${Math.round(v.projectedLeft)}% left at reset` };
@@ -1281,14 +1351,16 @@
   }
 
   function tipHtml(a, w, v) {
-    const rows = [
-      [`${a.name} ${a.plan || ''}`.trim(), w.label],
-      ['Left', pctText(v.left)],
-      ['Used', pctText(v.used)],
-      ['Window', fmtWindow(w.windowSec)],
-    ];
+    const rows = [[`${a.name} ${a.plan || ''}`.trim(), w.label]];
+    if (v.resetPassed) {
+      // The last figure the provider reported, and when, so it can't be mistaken for the current one.
+      const at = readingAt(a);
+      rows.push(['Now', RESET_DUE],
+        ['Last reading', `${v.previousUsed == null ? 'usage unknown' : `${pctText(v.previousUsed)} used`}, ${ago(at)}${at < w.resetsAt ? ' (before the reset)' : ''}`]);
+    } else rows.push(['Left', pctText(v.left)], ['Used', pctText(v.used)]);
+    rows.push(['Window', fmtWindow(w.windowSec)]);
     if (w.shareOfWeeklyPct != null) rows.push(['Allowance', `${w.shareOfWeeklyPct}% of the weekly limit`]);
-    if (w.resetsAt && !v.notStarted) rows.push(['Resets', fmtFull(w.resetsAt)]);
+    if (w.resetsAt && !v.notStarted) rows.push([v.resetPassed ? 'Reset was due' : 'Resets', fmtFull(w.resetsAt)]);
     if (v.timeLeftPct != null) rows.push(['Time left', `${Math.round(v.timeLeftPct)}% of window`]);
     if (v.unknown) rows.push(['Reading', 'Usage unknown']);
     if (a.stale) rows.push(['Reading', `from ${ago(a.fetchedAt)}`]);
@@ -1301,8 +1373,8 @@
   function renderWindow(a, w, now, ai, wi) {
     const v = view(w, now);
     const st = statusLabel(v);
-    const foot = footText(v, a.stale);
-    const aria = `${w.label}: ${v.unknown ? 'usage unknown' : `${Math.round(v.left)} percent left`}, ${resetText(w, v)}`;
+    const foot = footText(v, shownAge(a));
+    const aria = `${w.label}: ${v.unknown ? 'usage unknown' : v.resetPassed ? 'reset due, awaiting confirmation' : `${Math.round(v.left)} percent left`}, ${resetText(w, v)}`;
     const key = windowKey(a, w);
     const open = openWindows.has(key);
     const details = `win-${ai}-${wi}-details`;
@@ -1310,11 +1382,11 @@
       <div class="win" role="button" tabindex="0" aria-expanded="${open}" aria-controls="${details}"${open ? ` aria-describedby="${details}"` : ''} data-a="${ai}" data-w="${wi}" data-key="${esc(key)}" aria-label="${esc(aria)}">
         <div class="win-top"><span class="win-label">${esc(w.label)}</span><span class="win-reset">${esc(resetText(w, v))}</span></div>
         <div class="win-main">
-          <span class="big">${pctText(v.left)}</span><span class="big-unit">left</span>
+          ${v.resetPassed ? `<span class="pending">${RESET_DUE}</span>` : `<span class="big">${pctText(v.left)}</span><span class="big-unit">left</span>`}
           ${st ? `<span class="status ${st.cls}">${st.text}</span>` : ''}
         </div>
         <div class="meter ${v.level || ''}" aria-hidden="true">
-          ${v.unknown ? '' : `<div class="fill" style="width:${v.left}%"></div>`}
+          ${v.left == null ? '' : `<div class="fill" style="width:${v.left}%"></div>`}
           ${v.timeLeftPct != null ? `<div class="pace" style="left:${v.timeLeftPct}%"></div>` : ''}
         </div>
         <div class="win-bottom">
@@ -1327,6 +1399,8 @@
 
   // When an account's numbers were read: its own fetch time, else the payload's.
   const readingAt = (a) => a.fetchedAt ?? data.generatedAt;
+  // The reading age shown instead of ● Live: a stale account's, or any readable one's while quota loads fail.
+  const shownAge = (a) => (a.stale ? a.fetchedAt : quotaError && !a.error ? readingAt(a) : null);
 
   function renderCard(a, now, ai) {
     const mono = a.provider === 'claude' ? '✳' : a.provider === 'antigravity' ? '✦' : '◎';
@@ -1345,6 +1419,8 @@
       ? '<div class="card-note">No 5-hour limit reported by Anthropic for this account</div>'
       : '';
     const err = a.error ? `<div class="card-error">${a.stale ? 'Showing the last reading. ' : ''}${md(a.error)}</div>` : '';
+    // The same limits the Capacity tile names, with every shown scope, so the phone view and the card agree.
+    const limitsLine = a.windows?.length ? `<div class="card-limits">${limitLines(a, now).map((l) => `<div>${l}</div>`).join('')}</div>` : '';
     return `
       <article class="card">
         <header class="card-head">
@@ -1355,7 +1431,7 @@
           </div>
           ${fresh}
         </header>
-        ${a.stale ? err : ''}${body}${note}${a.stale ? '' : err}
+        ${limitsLine}${a.stale ? err : ''}${body}${note}${a.stale ? '' : err}
       </article>`;
   }
 
@@ -1367,10 +1443,10 @@
         return `<tr>
           <td>${esc(a.name)} ${esc(a.plan || '')}<br><span style="color:var(--ink-muted)">${esc(a.email || '')}</span></td>
           <td>${esc(w.label)}</td>
-          <td class="num">${pctText(v.left)}</td>
-          <td class="num">${pctText(v.used)}</td>
+          ${v.resetPassed ? `<td colspan="2">${RESET_DUE}</td>` : `<td class="num">${pctText(v.left)}</td>
+          <td class="num">${pctText(v.used)}</td>`}
           <td>${esc(resetText(w, v) || '–')}</td>
-          <td>${st ? esc(st.text) : v.unknown ? 'Usage unknown' : 'OK'}${a.stale || (quotaError && !a.error) ? ` (reading from ${esc(ago(readingAt(a)))})` : ''}</td>
+          <td>${st ? esc(st.text) : v.unknown ? 'Usage unknown' : v.resetPassed ? 'Awaiting confirmation' : 'OK'}${a.stale || (quotaError && !a.error) ? ` (reading from ${esc(ago(readingAt(a)))})` : ''}</td>
         </tr>`;
       }),
     );
@@ -1427,7 +1503,7 @@
     }
     $('legend').hidden = tableView;
 
-    // Tab title: the tightest known window per account, e.g. "25% · 95%". Unknown windows are skipped.
+    // Tab title: the tightest known window per account, e.g. "25% · 95%". Unknown and reset-due windows are skipped.
     const tight = data.accounts
       .map((a) => (a.windows || []).map((w) => view(w, now).left).filter((left) => left != null))
       .filter((lefts) => lefts.length)

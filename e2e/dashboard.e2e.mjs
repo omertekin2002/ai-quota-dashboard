@@ -448,6 +448,91 @@ test('window details open by tap or click, toggle by Enter and Space, close by E
   await expect(detailsOf(fiveHour)).toBeHidden();
 });
 
+test('a window whose reset passed shows Reset due, opens to its last reading, and returns to a percentage on fresh data', async ({ page, dash, isMobile }) => {
+  // Claude's 5-hour window: 62% used at a reading 3 hours old, with a reset time that passed a minute ago.
+  const quotas = quotasOf({ claudeUsed: 62 });
+  quotas.accounts[0].fetchedAt = Date.now() - 3 * HOUR;
+  quotas.accounts[0].windows[0].resetsAt = Date.now() - 60_000;
+  dash.state.quotas = quotas;
+  await dash.open();
+  const claude = card(page, 'claude-user@example.com');
+  const fiveHour = claude.locator('.win').nth(0);
+  await expect(fiveHour.locator('.pending')).toHaveText('Reset due · awaiting confirmation');
+  await expect(fiveHour.locator('.big, .fill, .pace, .status')).toHaveCount(0);
+  await expect(fiveHour.locator('.win-main')).not.toContainText('%');
+  await expect(fiveHour.locator('.win-foot')).toHaveText('Refreshing…');
+  // Capacity: the account's other window, with the pending reset noted, and never 100% left. The title skips it too.
+  const glanceRow = page.locator('#glance-capacity .glance-row').first();
+  await expect(glanceRow).toContainText('Limited by Weekly · 60% left');
+  await expect(glanceRow).toContainText('1 reset awaiting confirmation');
+  await expect(page.locator('#glance-capacity')).not.toContainText('100%');
+  await expect(page).toHaveTitle('60% · 50% · 95% · Quotas');
+  await expectNoSideScroll(page);
+
+  await press(fiveHour, isMobile);
+  await expect(fiveHour.locator('.win-details')).toContainText('Last reading: 62% used, 3h ago (before the reset)');
+  await expect(fiveHour.locator('.win-details')).not.toContainText('Left:');
+  await expectNoSideScroll(page);
+
+  await page.locator('#view').click();
+  await expect(page.locator('#content tbody tr').first()).toContainText('Reset due · awaiting confirmation');
+  await expect(page.locator('#content tbody tr').first()).not.toContainText('%');
+  await page.locator('#view').click();
+
+  // The provider reports the new window: nothing used yet. The page shows its figure again.
+  const fresh = quotasOf({ claudeUsed: 0 });
+  fresh.accounts[0].windows[0].resetsAt = Date.now() + 5 * HOUR;
+  dash.state.quotas = fresh;
+  await dash.refresh();
+  await expect(fiveHour.locator('.big')).toHaveText('100%');
+  await expect(page.locator('#content')).not.toContainText('Reset due');
+  await expect(glanceRow).not.toContainText('awaiting confirmation');
+  await expect(page).toHaveTitle('60% · 50% · 95% · Quotas');
+});
+
+test('Capacity names each Antigravity scope on its own line, with the card agreeing, and the phone row never scrolls sideways', async ({ page, dash }) => {
+  // The live reading of 2026-11-20: Gemini's weekly bucket nearly spent, the shared Claude & GPT one about half left.
+  const quotas = quotasOf();
+  const now = Date.now();
+  // Ten spare minutes keep the countdowns at whole days while the page loads.
+  const bucket = (id, scope, cadence, usedPct, resetIn, windowSec) => ({ id, label: `${scope} · ${cadence}`, scope, usedPct, resetsAt: now + resetIn + 10 * 60_000, windowSec });
+  quotas.accounts[2].windows = [
+    bucket('gemini-5h', 'Gemini', '5-hour', 0, 5 * HOUR, 18_000),
+    bucket('3p-5h', 'Claude & GPT (shared)', '5-hour', 10, 3 * HOUR, 18_000),
+    bucket('gemini-weekly', 'Gemini', 'Weekly', 98.6, 4 * DAY, 604_800),
+    bucket('3p-weekly', 'Claude & GPT (shared)', 'Weekly', 54, 2 * DAY, 604_800),
+    bucket('gemini-argon-weekly', 'Gemini 4 Argon (a long group name for the phone layout)', 'Weekly', null, 4 * DAY, 604_800),
+  ];
+  // A Claude model limit tighter than the account's own windows.
+  quotas.accounts[0].windows.push({ id: 'weekly_fable', label: 'Weekly · Fable', scope: 'Fable', usedPct: 92, resetsAt: now + 2 * DAY, windowSec: 604_800 });
+  dash.state.quotas = quotas;
+  await dash.open();
+
+  const rows = page.locator('#glance-capacity .glance-row');
+  const agy = rows.filter({ hasText: 'antigravity-user@example.com' });
+  const agyLines = agy.locator('.glance-what');
+  await expect(agyLines).toHaveCount(3);
+  await expect(agyLines.nth(0)).toHaveText('Gemini: Weekly 1% left · resets in 4d ⛔ Nearly out');
+  await expect(agyLines.nth(1)).toHaveText('Claude & GPT (shared): Weekly 46% left · resets in 2d');
+  await expect(agyLines.nth(2)).toHaveText("Gemini 4 Argon (a long group name for the phone layout): — can't tell");
+  await expect(agy).not.toContainText('Limited by');
+
+  const claude = rows.filter({ hasText: 'claude-user@example.com' }).locator('.glance-what');
+  await expect(claude).toHaveCount(2);
+  await expect(claude.nth(0)).toContainText('Limited by Weekly · 60% left');
+  await expect(claude.nth(1)).toContainText('Fable: Weekly 8% left');
+
+  // The card shows the same lines under its header, and its window rows are unchanged.
+  const agyCard = card(page, 'antigravity-user@example.com');
+  await expect(agyCard.locator('.card-limits > div')).toHaveText(await agyLines.allTextContents());
+  await expect(agyCard.locator('.win')).toHaveCount(5);
+  await expectNoSideScroll(page);
+  for (const el of [page.locator('#glance-capacity'), agyCard]) {
+    const { scrollWidth, clientWidth } = await el.evaluate((n) => ({ scrollWidth: n.scrollWidth, clientWidth: n.clientWidth }));
+    expect(scrollWidth, 'Capacity tile and card fit their width').toBeLessThanOrEqual(clientWidth);
+  }
+});
+
 // ---------- 3. workspace warning ----------
 test('workspace warning: a failed HTTP check opens the panel, the tile names it, and Hide/Show details toggles it', async ({ page, dash }) => {
   dash.state.workspace = failingCheckWorkspace();

@@ -13,7 +13,7 @@ npm run json         # print current quotas as JSON and exit
 
 At the top, an **At a glance** strip answers three questions before you scroll. Each tile's title links to its full panel:
 
-- **Capacity**: one line per account with its tightest known window, its % left, the reset countdown and the same **⚠ Low** / **⛔ Nearly out** text as the cards. A stale account shows its reading age (◷), an account with no readable usage shows `—`, and a window past its reset says "Estimated". Accounts are never added up or compared with each other, because a percentage of one subscription isn't the same capacity as a percentage of another.
+- **Capacity**: one row per account naming the window that limits it, within each scope. Every window has a scope: the whole account, or one model, model family or feature (see `scope` under [`/api/quotas` is an API](#apiquotas-is-an-api)). The row starts with "Limited by" the tightest account-wide window, its % left, the reset countdown and the same **⚠ Low** / **⛔ Nearly out** text as the cards. Account-wide limits bind every model too, so a model or feature limit gets its own line (e.g. "Fable: Weekly 10% left · resets in 2d") only when it is tighter. An account with no account-wide window, like Antigravity, lists each scope on its own line, e.g. "Gemini: Weekly 1% left" and "Claude & GPT (shared): Weekly 46% left", so a Gemini-only limit doesn't hide the shared allowance. At most 3 scope lines show, then "+N more"; the card lists them all under its header. A stale account shows its reading age (◷), an account with no readable usage shows `—`, a scope with no readable usage says "can't tell", and a window past its reset counts as unknown until a provider confirms it: it's never a limiter, the line adds "· 1 reset awaiting confirmation", or says "Reset due · awaiting confirmation" when no window is current. It never shows 100% left for a reset nobody has confirmed. Accounts are never added up or compared with each other, because a percentage of one subscription isn't the same capacity as a percentage of another.
 - **Needs you**: how many items in the [Agent pipeline](#agent-pipeline)'s "Needs your attention" list are waiting on you, counted by kind (for example "2 blocked · 1 decision · 1 umbrella to merge"), with 🔥 when one is urgent. Otherwise it says "Nothing needs you".
 - **Workspace**: "All OK" when every [Workspace computer](#workspace-computer) reading is healthy. Otherwise it counts the critical (⛔) and warning (⚠) conditions and names the first two, such as "⛔ CLIProxyAPI check failed". The tile and the panels use the same level rules for services and their HTTP checks, memory, internet, battery, temperature, disks, the T7 backup and the auto-updater, so the two can't disagree.
 
@@ -28,6 +28,8 @@ For each account and limit window, including model-specific ones such as Claude'
 - a **Low** warning (≤30% left) or **Nearly out** warning (≤10% left)
 - a pace projection: how much will be left at the reset if you keep the current rate
 - a tick on the meter marking how much of the window's time is left. If the bar ends left of the tick, you're using the quota faster than it refills.
+
+Once a window's reset time passes, the page doesn't assume the allowance came back: a countdown reaching zero isn't proof that the provider reset it. Until a reading reports the new window, the card and the Table show **Reset due · awaiting confirmation** instead of a percentage, with no meter fill, Low/Nearly out label or pace projection, and the tab title leaves the window out. Its footer says "Refreshing…" while the page fetches fresh numbers, or gives the reading's age when it can't (a stale account, or while quota loads fail). The window's details keep the last reported figure and when it was read, for example "Last reading: 62% used, 3h ago (before the reset)". The next reading with a new reset time shows the provider's figure again, including a real 0% used.
 
 When Anthropic's usage API reports no 5-hour window for a Claude account (`five_hour: null`), its card says "No 5-hour limit reported by Anthropic for this account" below the windows, so a missing 5-hour row isn't mistaken for a failed reading. No 5-hour row or percentage is made up for it.
 
@@ -136,7 +138,7 @@ The full history file (about 150 KB at the 1000-event cap) is rewritten only whe
 
 Monitoring reads `/sys`, `/proc`, selected `systemctl show` properties, process memory, filesystem space, NetworkManager, and Tailscale status, and makes bounded HTTP(S) checks. It never controls services or changes power/network settings. The monitored units are listed in `workspace.mjs`, and health endpoints in `diagnostics.mjs`; unsupported operating systems still show quotas normally. No new packages or elevated privileges are needed.
 
-Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s. `test/deploy.test.mjs` runs `deploy/update.sh` against a temporary git origin and clone with a fake `systemctl`, and `deploy/install.sh` against a temporary home.
+Run `npm test` for quota parsing (Claude and Codex usage windows, plans, credential discovery, last-good fallback, the Host allow-list), collectors, HTTP payload validation, missing mounts, backup failures, event persistence, network quality, UI rendering/escaping, and caching checks. It also starts the HTTP server on a random port with fake collectors and checks the Host allow-list, every route, `force` pass-through, `Cache-Control`, 404s and 500s. `test/quotas-contract.test.mjs` pins the `/api/quotas` fields build-workflow reads (see [`/api/quotas` is an API](#apiquotas-is-an-api)). `test/deploy.test.mjs` runs `deploy/update.sh` against a temporary git origin and clone with a fake `systemctl`, and `deploy/install.sh` against a temporary home.
 
 `npm test` needs no install. The browser checks do: run `npm ci`, `npx playwright install chromium` once, then `npm run test:browser`. They live in `e2e/` and start the real server (`createDashboardServer()`) on a random port with fake collectors, so they read no credentials, providers, `agentctl` or `/proc`, and any request to anything but that server fails the test. Headless Chromium loads the page at phone (390×844, touch) and desktop (1280×800) width and checks that the page never scrolls sideways, that quota cards sit under At a glance, that window details open by tap, click, Enter or Space, close with Escape, keep focus and survive a refresh, that a failed workspace HTTP check opens the Workspace computer panel and names it in the glance tile, that Show/Hide details is remembered across reloads, that the glance tile's Workspace link opens a collapsed panel, that the Agent pipeline collapses to one summary line while nothing needs you, opens by keyboard, remembers Show/Hide across reloads, reopens for a new attention item and opens from the Needs you link (also when the URL already ends in `#pipeline`), that a closed Agent pipeline repo stays closed through a refresh, and that a failing quota collector shows "Couldn't refresh" while the other panels keep working. A failed run keeps a trace in `test-results/` (`npx playwright show-trace <file>`).
 
@@ -159,6 +161,34 @@ Usage numbers come from `api.anthropic.com/api/oauth/usage` and `chatgpt.com/bac
 Antigravity quotas are collected directly from Google's `v1internal:retrieveUserQuotaSummary` API on `daily-cloudcode-pa.googleapis.com` and `cloudcode-pa.googleapis.com`, using the login T3 already saved. T3 does not need to be running. The collector reads both endpoints and keeps the higher usage for duplicate buckets; older accounts fall back to `fetchAvailableModels`. Cards show Gemini, Gemini Argon, and shared Claude/GPT buckets as reported, including their five-hour and weekly windows. Legacy model quotas without a reported cadence get no invented window length, billing cycle, or pace projection. Untouched buckets with a moving reset of now plus the window length get no countdown.
 
 The collector renews Google's access token using the saved refresh token and retains it only in memory, until one minute before expiry. It never writes to T3's login files, launches AGY, or makes a model request. Account email is optional and comes from Google's user-info endpoint. Requests use fixed Google destinations, reject redirects, time out after 10 seconds each, and have a 30-second total budget per login. Missing/malformed quota responses retain the last successful reading with a stale warning. Enterprise, API-key, and gateway logins are not collected. These Google quota APIs are internal and may change.
+
+## `/api/quotas` is an API
+
+The page isn't the only reader of `GET /api/quotas`. build-workflow's `src/quota.ts` reads it to pace workers and plans, decide on Codex reviews and pick council members. It relies on these fields:
+
+| Where | Field | Type and unit |
+|---|---|---|
+| top level | `accounts` | array |
+| account | `provider` | `"claude"`, `"openai"` or `"antigravity"` |
+| account | `windows` | array |
+| account | `limitReached` | boolean |
+| account | `fetchedAt` | epoch **milliseconds** of the successful reading. A stale account served from the last good reading keeps that reading's time, not the time of the failed attempt. |
+| window | `id` | string |
+| window | `usedPct` | number, or `null` when unknown |
+| window | `resetsAt` | epoch **milliseconds**, or `null` |
+| window | `windowSec` | seconds, or `null` |
+
+An account whose reading failed has an `error` string. If there was an earlier good reading, the account is that reading with `stale: true`; if there wasn't, it has no `windows`, `fetchedAt` or `limitReached`.
+
+Window ids it looks for: Claude `seven_day` (604800) and `five_hour` (18000), which is absent when Anthropic reports `five_hour: null`; Claude model-scoped 5-hour windows, found by `windowSec` 18000; Codex `primary` (5-hour) and `secondary` (weekly); Antigravity `gemini-*` bucket ids, with `gemini-argon-*` told apart, `windowSec` 604800 for weekly and 18000 for 5-hour.
+
+Optional fields build-workflow doesn't read, added later:
+
+| Where | Field | Type and meaning |
+|---|---|---|
+| window | `scope` | `null` when the window limits the whole account, otherwise a non-empty string naming the model, model family or feature the window alone limits. Claude: `five_hour` and `seven_day` are `null`, `seven_day_opus` is `"Opus"`, `seven_day_sonnet` is `"Sonnet"`, a model limit is its model name (e.g. `"Fable"`), extra usage is `"Extra usage"`. Codex: `primary` and `secondary` are `null`, an additional limit is its name, the code-review windows are `"Code review"`. Antigravity has no account-wide window: every window's scope is the family its label starts with (`"Gemini"`, `"Claude & GPT (shared)"`, the Gemini Argon group name, or `"Claude"`/`"GPT"`/`"Gemini"` for legacy model quotas). A reading saved before `scope` existed lacks it; the page then takes the scope from the label. |
+
+Changes to this API are **additive only**. New fields are fine. Renaming or removing a field above, or changing its type or unit (for example seconds instead of milliseconds), breaks build-workflow's quota gating. `test/quotas-contract.test.mjs` pins these fields: it runs the real collector on faked upstream replies, reads `/api/quotas` over HTTP, and fails with a message naming `src/quota.ts` when one of them changes.
 
 ## Running on another machine via Tailscale
 

@@ -179,21 +179,24 @@ export function claudePlan(profile, fallback) {
 
 const LIMIT_GROUPS = { session: ['5-hour', 5 * 3600], weekly: ['Weekly', 7 * 86400] };
 
+// Every window carries `scope`: null when it limits the whole account, otherwise the model, model
+// family or feature it alone limits. The page groups windows by scope to name each binding limit.
 export function claudeWindows(u) {
   const defs = [
-    ['five_hour', '5-hour', 5 * 3600],
-    ['seven_day', 'Weekly', 7 * 86400],
-    ['seven_day_opus', 'Weekly · Opus', 7 * 86400],
-    ['seven_day_sonnet', 'Weekly · Sonnet', 7 * 86400],
+    ['five_hour', '5-hour', 5 * 3600, null],
+    ['seven_day', 'Weekly', 7 * 86400, null],
+    ['seven_day_opus', 'Weekly · Opus', 7 * 86400, 'Opus'],
+    ['seven_day_sonnet', 'Weekly · Sonnet', 7 * 86400, 'Sonnet'],
   ];
   const windows = defs
     .filter(([key]) => u[key])
-    .map(([key, label, windowSec]) => ({
+    .map(([key, label, windowSec, scope]) => ({
       id: key,
       label,
       usedPct: pct(u[key].utilization),
       resetsAt: toMs(u[key].resets_at),
       windowSec,
+      scope,
     }));
   // Limits for a single model (e.g. Fable's own weekly cap) only appear in the newer `limits` list.
   (u.limits || []).forEach((l, i) => {
@@ -210,10 +213,11 @@ export function claudeWindows(u) {
       resetsAt: toMs(l.resets_at),
       windowSec,
       shareOfWeeklyPct: share?.allowance_percent_of_weekly ?? null,
+      scope: model,
     });
   });
   if (u.extra_usage?.is_enabled && pct(u.extra_usage.utilization) != null) {
-    windows.push({ id: 'extra_usage', label: 'Extra usage · monthly', usedPct: pct(u.extra_usage.utilization), resetsAt: null, windowSec: null });
+    windows.push({ id: 'extra_usage', label: 'Extra usage · monthly', usedPct: pct(u.extra_usage.utilization), resetsAt: null, windowSec: null, scope: 'Extra usage' });
   }
   return windows;
 }
@@ -271,6 +275,7 @@ export function windowLabel(sec) {
 
 export function codexWindows(u, now = Date.now()) {
   const windows = [];
+  // The prefix doubles as the scope: the account-wide windows have none.
   const add = (w, prefix, id) => {
     if (!w) return;
     windows.push({
@@ -279,6 +284,7 @@ export function codexWindows(u, now = Date.now()) {
       usedPct: pct(w.used_percent),
       resetsAt: toMs(w.reset_at) ?? (w.reset_after_seconds != null ? now + w.reset_after_seconds * 1000 : null),
       windowSec: w.limit_window_seconds ?? null,
+      scope: prefix || null,
     });
   };
   add(u.rate_limit?.primary_window, '', 'primary');

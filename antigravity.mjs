@@ -41,11 +41,12 @@ export function antigravityCredentials(t3StateDir) {
   return [...credentials.values()];
 }
 
-function window(id, label, quota, windowSec) {
+// `scope` is the model family the window alone limits. Antigravity has no account-wide window.
+function window(id, label, quota, windowSec, scope) {
   const remaining = fraction(quota?.remainingFraction);
   return {
     id, label, usedPct: remaining == null ? null : (1 - remaining) * 100,
-    resetsAt: time(quota?.resetTime), windowSec,
+    resetsAt: time(quota?.resetTime), windowSec, scope,
     ...(windowSec == null ? { resetUnknown: true } : {}),
   };
 }
@@ -73,7 +74,7 @@ export function antigravitySummaryWindows(summary, requestedAt = Date.now()) {
     const duration = Object.hasOwn(DURATIONS, bucket.window) ? DURATIONS[bucket.window] : null;
     const cadence = bucket.window === '5h' ? '5-hour' : bucket.window === 'weekly' ? 'Weekly'
       : typeof bucket.displayName === 'string' ? bucket.displayName : 'Quota';
-    const w = window(bucket.bucketId, `${family} · ${cadence}`, bucket, duration);
+    const w = window(bucket.bucketId, `${family} · ${cadence}`, bucket, duration, family);
     // Google gives untouched buckets a moving now+duration reset. That is not a
     // running window, so don't turn it into a countdown or a pace projection.
     if (bucket.remainingFraction === 1 && bucket.description == null && duration && w.resetsAt != null
@@ -95,7 +96,7 @@ export function antigravityModelWindows(response) {
     for (const [key, suffix, label, duration] of [
       ['quotaInfo', 'quota', 'Reported quota', null], ['weeklyQuotaInfo', 'weekly', 'Weekly', 604800],
     ]) {
-      if (model[key]) windows.push(window(`${family.toLowerCase()}-${suffix}`, `${family} · ${label}`, model[key], duration));
+      if (model[key]) windows.push(window(`${family.toLowerCase()}-${suffix}`, `${family} · ${label}`, model[key], duration, family));
     }
   }
   return mergeWindows([windows]);

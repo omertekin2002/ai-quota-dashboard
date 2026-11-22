@@ -211,10 +211,14 @@ test('dashboard shows unreadable usage as unknown, never as 100% left', async ()
     for (const bad of ['NaN', 'null', 'undefined', '100%']) assert.ok(!text.includes(bad), `${bad} in ${text}`);
   }
 
-  // Once the reset time passes, the window has refilled, so the estimate is 100% left again.
+  // Once the reset time passes, nothing has confirmed the window refilled: it is reset-due, never 100% left,
+  // and the tab title skips it.
   vm.runInContext(`data.accounts[1].windows[0].resetsAt = ${now - 1000}; tableView = false; render();`, context);
-  assert.ok(element('content').innerHTML.includes('Estimated. Refreshing…'));
-  assert.equal(document.title, '40% · 100% · Quotas');
+  const due = winsOf(element('content').innerHTML)[2];
+  assert.ok(due.includes('<span class="pending">Reset due · awaiting confirmation</span>'), due);
+  assert.ok(due.includes('<div class="win-foot ">Refreshing…</div>'), due);
+  assert.ok(!due.includes('%'), due);
+  assert.equal(document.title, '40% · Quotas');
 });
 
 // Quota card fixtures. The page clock is pinned to NOW, so nothing below depends on the real clock.
@@ -232,7 +236,7 @@ const quotasOf = (...accounts) => ({ generatedAt: NOW, accounts });
 const cardsOf = (html) => html.split('<article class="card">').slice(1);
 const winsOf = (html) => html.split('class="win"').slice(1);
 const tableRowsOf = (html) => html.split('<tr>').slice(2);
-const TAGS = 'div|span|article|header|code|table|thead|tbody|tr|th|td|br';
+const TAGS = 'div|span|strong|p|ul|li|article|header|code|table|thead|tbody|tr|th|td|br';
 
 // Rendered output never shows a broken value, and every `<` opens one of the page's own tags.
 function assertClean(text) {
@@ -385,11 +389,13 @@ test('stale accounts show their reading age, put the error first, and never prom
   assert.ok(failingCard.indexOf('<div class="card-error">HTTP 500 from usage endpoint</div>') > failingCard.indexOf('class="win"'), failingCard);
   assert.ok(!failingCard.includes('Showing the last reading'), failingCard);
 
-  // The stale window's reset has passed: it estimates 100% left, but no reload is scheduled, so no "Refreshing…".
+  // The stale window's reset has passed: it is reset-due with no percentage, and no reload is scheduled,
+  // so its footer gives the reading's age instead of "Refreshing…".
   const [passed] = winsOf(staleCard);
-  assert.ok(passed.includes('<span class="big">100%</span>'), passed);
-  assert.ok(passed.includes('<span class="win-reset">reset since last reading</span>'), passed);
-  assert.ok(passed.includes('<div class="win-foot ">Estimated: reset since this reading</div>'), passed);
+  assert.ok(passed.includes('<span class="pending">Reset due · awaiting confirmation</span>'), passed);
+  assert.ok(!passed.includes('class="big"') && !passed.includes('%'), passed);
+  assert.ok(passed.includes('<span class="win-reset">reset due 1m ago</span>'), passed);
+  assert.ok(passed.includes('<div class="win-foot ">Last reading 1h ago</div>'), passed);
   assert.ok(!page.cards.includes('Refreshing'), page.cards);
   assert.deepEqual(page.timeouts, []);
 
@@ -402,9 +408,9 @@ test('stale accounts show their reading age, put the error first, and never prom
   assert.ok(tip.includes('<span class="k">Reading:</span> from 1h ago'), tip);
   assertClean(tip);
 
-  // The same reading from a live account still says it is refreshing, and schedules the 20-second reload.
+  // The same reading from a live account says it is refreshing, and schedules the 20-second reload.
   page.run('data.accounts[0].stale = false; render();');
-  assert.ok(winsOf(cardsOf(page.element('content').innerHTML)[0])[0].includes('Estimated. Refreshing…'));
+  assert.ok(winsOf(cardsOf(page.element('content').innerHTML)[0])[0].includes('<div class="win-foot ">Refreshing…</div>'));
   assert.deepEqual(page.timeouts, [20_000]);
 });
 
@@ -1226,7 +1232,7 @@ test('an At a glance strip sits under the top bar, above the Workspace computer 
 test('At a glance, healthy: each account’s tightest window, nothing needs you, and the workspace is all OK', async () => {
   const page = await glancePage();
   const t = tiles(page);
-  assert.equal(t.capacity, 'Claude Max · a@example.com Weekly 60% left · resets in 3d ChatGPT Plus · b@example.com 5-hour 50% left · resets in 2h');
+  assert.equal(t.capacity, 'Claude Max · a@example.com Limited by Weekly · 60% left · resets in 3d ChatGPT Plus · b@example.com Limited by 5-hour · 50% left · resets in 2h');
   assert.equal(t.attention, '✓ Nothing needs you');
   assert.equal(t.workspace, '✓ All OK');
   for (const id of ['capacity', 'attention', 'workspace']) assertClean(page.element(`glance-${id}`).innerHTML.replace(/<\/?(p|ul|li|strong)( class="[^"]*")?>/g, ''));
@@ -1243,17 +1249,237 @@ test('At a glance, quota-constrained: the binding window with its level and rese
   ) });
   const rows = page.element('glance-capacity').innerHTML.split('<li class="glance-row">').slice(1).map((r) => unescapeHtml(r.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim());
   assert.deepEqual(rows, [
-    'Claude Max · a@example.com Weekly 8% left · resets in 2d 3h ⛔ Nearly out',
-    'Claude Max · low@example.com 5-hour 25% left · resets in 1h ⚠ Low',
-    'Claude Max · stale@example.com 5-hour 80% left · resets in 2h 30m ◷ 3h ago',
+    'Claude Max · a@example.com Limited by Weekly · 8% left · resets in 2d 3h ⛔ Nearly out',
+    'Claude Max · low@example.com Limited by 5-hour · 25% left · resets in 1h ⚠ Low',
+    'Claude Max · stale@example.com Limited by 5-hour · 80% left · resets in 2h 30m ◷ 3h ago',
     'ChatGPT Max · u@example.com — Usage unknown',
     "ChatGPT Max · e@example.com — Couldn't read usage",
-    'ChatGPT Max · r@example.com 5-hour 100% left · Estimated. Refreshing…',
+    'ChatGPT Max · r@example.com Reset due · awaiting confirmation',
   ]);
+  assert.ok(!tileText(page, 'capacity').includes('100%'));
   assert.ok(page.element('glance-capacity').innerHTML.includes('<span class="critical">⛔ Nearly out</span>'));
   assert.ok(!rows[3].includes('100%'));
   // Nothing is summed or compared across accounts.
   assert.ok(!/total|combined/i.test(tileText(page, 'capacity')));
+});
+
+const RESET_DUE = 'Reset due · awaiting confirmation';
+
+test('a window past its reset is reset-due: no percentage, meter fill, level or pace in the card, Table or title', async () => {
+  // 62% used, read 3 h ago, with a reset that passed a minute ago; and a 95%-used one that would be "Nearly out".
+  const page = await renderQuotas(quotasOf(
+    account('claude:a', [win('5-hour', 62, -60), win('Weekly', 95, -120, WEEK), win('Opus', 20, 9000)], { fetchedAt: NOW - 3 * 3600_000 }),
+  ));
+  const [due, dueHigh, current] = winsOf(page.cards);
+  for (const w of [due, dueHigh]) {
+    assert.ok(w.includes(`<span class="pending">${RESET_DUE}</span>`), w);
+    assert.ok(!w.includes('%') && !w.includes('class="big"'), w);
+    assert.ok(w.includes('<div class="meter " aria-hidden="true">'), w);
+    assert.ok(!w.includes('class="fill"') && !w.includes('class="pace"') && !w.includes('class="status'), w);
+    assert.ok(!w.includes('At this pace') && !w.includes('Low') && !w.includes('Nearly out') && !w.includes('Limit reached'), w);
+    assert.ok(w.includes('<div class="win-foot ">Refreshing…</div>'), w);
+  }
+  assert.ok(due.includes('aria-label="5-hour: reset due, awaiting confirmation, reset due 1m ago"'), due);
+  assert.ok(dueHigh.includes('<span class="win-reset">reset due 2m ago</span>'), dueHigh);
+  assert.ok(current.includes('<span class="big">80%</span>'), current);
+
+  const rows = tableRowsOf(page.table);
+  for (const row of rows.slice(0, 2)) {
+    assert.ok(row.includes(`<td colspan="2">${RESET_DUE}</td>`), row);
+    assert.ok(row.includes('<td>Awaiting confirmation</td>'), row);
+    assert.ok(!row.includes('%') && !row.includes('OK') && !row.includes('Nearly out'), row);
+  }
+  assert.ok(rows[2].includes('<td class="num">80%</td>'), rows[2]);
+  assert.equal(page.document.title, '80% · Quotas');
+
+  // An account whose only windows are reset-due has nothing for the title.
+  page.run(`data.accounts[0].windows.pop(); render();`);
+  assert.equal(page.document.title, 'Quotas');
+});
+
+test('a reset-due window’s details and tooltip show the last reading, its age, and that it is from before the reset', async () => {
+  const page = await renderQuotas(quotasOf(
+    account('claude:a', [win('5-hour', 62, -60), win('Weekly', null, -60, WEEK)], { fetchedAt: NOW - 3 * 3600_000 }),
+  ));
+  const tip = page.hover(0, 0);
+  assert.ok(tip.includes(`<span class="k">Now:</span> ${RESET_DUE}`), tip);
+  assert.ok(tip.includes('<span class="k">Last reading:</span> 62% used, 3h ago (before the reset)'), tip);
+  assert.ok(tip.includes('<span class="k">Reset was due:</span> '), tip);
+  assert.ok(!tip.includes('Left:') && !tip.includes('Used:') && !tip.includes('Time left:'), tip);
+  assertClean(tip);
+
+  page.click(page.winEl(0, 0));
+  const open = winsOf(page.element('content').innerHTML)[0];
+  assert.ok(open.includes('<span class="k">Last reading:</span> 62% used, 3h ago (before the reset)'), open);
+  assertClean(open);
+
+  // An unreadable previous figure says so, and a reading taken after the reset time isn't called "before the reset".
+  assert.ok(page.hover(0, 1).includes('<span class="k">Last reading:</span> usage unknown, 3h ago (before the reset)'));
+  page.run(`data.accounts[0].fetchedAt = ${NOW - 30_000}; render();`);
+  const late = winsOf(page.element('content').innerHTML)[0];
+  assert.ok(late.includes('<span class="k">Last reading:</span> 62% used, just now</div>'), late);
+});
+
+test('a stale account past its reset keeps its age and error, and shows no percentage anywhere', async () => {
+  const page = await renderQuotas(quotasOf(
+    account('openai:s', [win('5-hour', 62, -60)], { provider: 'openai', name: 'ChatGPT', stale: true, fetchedAt: NOW - 2 * 3600_000, error: "Couldn't refresh: HTTP 401" }),
+  ));
+  const [card] = cardsOf(page.cards);
+  assert.ok(card.includes('◷ 2h ago</span>') && card.includes('Showing the last reading.'), card);
+  assert.ok(card.includes('<div class="win-foot ">Last reading 2h ago</div>'), card);
+  assert.ok(!card.includes('%'), card);
+  assert.ok(tableRowsOf(page.table)[0].includes('<td>Awaiting confirmation (reading from 2h ago)</td>'), page.table);
+  assert.equal(tileText(page, 'capacity'), `ChatGPT Max · a@example.com ${RESET_DUE} ◷ 2h ago`);
+  assert.equal(page.document.title, 'Quotas');
+
+  // While quota loads fail, a live account's reset-due window gives its age too: no reload is coming.
+  page.run(`data.accounts[0].stale = false; data.accounts[0].error = null; quotaError = true; render();`);
+  assert.ok(winsOf(page.element('content').innerHTML)[0].includes('<div class="win-foot ">Last reading 2h ago</div>'));
+});
+
+test('Capacity uses the tightest current window and notes pending resets; an all-reset-due account never shows 100% left', async () => {
+  const page = await glancePage({ quotas: quotasOf(
+    account('claude:a', [win('5-hour', 62, -60), win('Weekly', 40, 3 * 86400, WEEK)]),
+    account('claude:b', [win('5-hour', 10, -60), win('Weekly', 30, -120, WEEK), win('Opus', 95, 9000)], { email: 'b@example.com' }),
+    account('openai:c', [win('5-hour', 62, -60), win('Weekly', 0, -60, WEEK)], { provider: 'openai', name: 'ChatGPT', email: 'c@example.com' }),
+  ) });
+  const rows = page.element('glance-capacity').innerHTML.split('<li class="glance-row">').slice(1).map((r) => unescapeHtml(r.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim());
+  assert.deepEqual(rows, [
+    'Claude Max · a@example.com Limited by Weekly · 60% left · resets in 3d · 1 reset awaiting confirmation',
+    `Claude Max · b@example.com ${RESET_DUE} Opus: 5% left · resets in 2h 30m ⛔ Nearly out`,
+    `ChatGPT Max · c@example.com ${RESET_DUE}`,
+  ]);
+  assert.ok(!tileText(page, 'capacity').includes('100%'));
+});
+
+// ---------- limits per scope: the account-wide limiter, plus any scope that binds tighter ----------
+// Each Capacity row as [who, ...lines], one entry per line of the row.
+const capacityLines = (page) => page.element('glance-capacity').innerHTML.split('<li class="glance-row">').slice(1)
+  .map((row) => row.split(/<div class="glance-(?:who|what)">/).slice(1).map((l) => unescapeHtml(l.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim()));
+// Each card's limits lines.
+const cardLimits = (html) => cardsOf(html).map((c) => {
+  const m = c.match(/<div class="card-limits">([\s\S]*?)<\/div><\/div>/);
+  return m ? m[1].split('<div>').slice(1).map((l) => unescapeHtml(l.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim()) : null;
+});
+const DAY = 86_400;
+const agy = (windows, extra = {}) => account('antigravity:a', windows, { provider: 'antigravity', name: 'Antigravity', plan: null, ...extra });
+const scoped = (scope, label, usedPct, toResetSec, windowSec = WEEK) => win(`${scope} · ${label}`, usedPct, toResetSec, windowSec, { scope });
+
+test('Capacity names each Antigravity scope with its own figure and reset, and none claims the whole account', async () => {
+  // The live reading of 2026-11-20: Gemini's weekly bucket nearly spent, the shared Claude & GPT one about half left.
+  const page = await renderQuotas(quotasOf(agy([
+    scoped('Gemini', '5-hour', 0, 5 * 3600, FIVE_HOURS),
+    scoped('Claude & GPT (shared)', '5-hour', 10, 3 * 3600, FIVE_HOURS),
+    scoped('Gemini', 'Weekly', 98.6, 4 * DAY),
+    scoped('Claude & GPT (shared)', 'Weekly', 54, 2 * DAY),
+  ])));
+  const [row] = capacityLines(page);
+  assert.deepEqual(row, [
+    'Antigravity · a@example.com',
+    'Gemini: Weekly 1% left · resets in 4d ⛔ Nearly out',
+    'Claude & GPT (shared): Weekly 46% left · resets in 2d',
+  ]);
+  assert.ok(!tileText(page, 'capacity').includes('Limited by'));
+  // The card says the same, under its header; the window rows are unchanged.
+  assert.deepEqual(cardLimits(page.cards)[0], row.slice(1));
+  assert.ok(page.cards.indexOf('class="card-limits"') > page.cards.indexOf('</header>'));
+  assert.equal(winsOf(page.cards).length, 4);
+  assertClean(page.element('glance-capacity').innerHTML);
+});
+
+test('Capacity adds a model scope only when it binds tighter than the account-wide limiter', async () => {
+  const tight = await glancePage({ quotas: quotasOf(account('claude:a', [
+    win('5-hour', 30, 3 * 3600, FIVE_HOURS, { scope: null }),
+    win('Weekly', 50, 3 * DAY, WEEK, { scope: null }),
+    win('Weekly · Fable', 90, 2 * DAY, WEEK, { scope: 'Fable' }),
+  ])) });
+  assert.deepEqual(capacityLines(tight)[0], [
+    'Claude Max · a@example.com',
+    'Limited by Weekly · 50% left · resets in 3d',
+    'Fable: Weekly 10% left · resets in 2d ⛔ Nearly out',
+  ]);
+  assert.deepEqual(cardLimits(tight.element('content').innerHTML)[0], capacityLines(tight)[0].slice(1));
+
+  const loose = await glancePage({ quotas: quotasOf(account('claude:a', [
+    win('5-hour', 30, 3 * 3600, FIVE_HOURS, { scope: null }),
+    win('Weekly', 50, 3 * DAY, WEEK, { scope: null }),
+    win('Weekly · Fable', 20, 2 * DAY, WEEK, { scope: 'Fable' }),
+  ])) });
+  assert.deepEqual(capacityLines(loose)[0], ['Claude Max · a@example.com', 'Limited by Weekly · 50% left · resets in 3d']);
+});
+
+test('Capacity: an all-unknown scope can’t tell, and a reset-due window is never a limiter or 100% left', async () => {
+  const page = await glancePage({ quotas: quotasOf(
+    agy([scoped('Gemini', 'Weekly', null, 4 * DAY), scoped('Claude & GPT (shared)', 'Weekly', 30, 2 * DAY), scoped('Gemini Argon', 'Weekly', 0, -60)]),
+    // A 0%-used Fable window past its reset would read 100% left; it's only counted as pending.
+    account('claude:b', [win('5-hour', 30, 3 * 3600), win('Weekly', 50, 3 * DAY, WEEK), win('Weekly · Fable', 0, -60, WEEK, { scope: 'Fable' })], { email: 'b@example.com' }),
+    // With the account-wide windows reset-due, the scope with a current figure still shows.
+    account('claude:c', [win('5-hour', 30, -60), win('Weekly · Opus', 40, 2 * DAY, WEEK, { scope: 'Opus' })], { email: 'c@example.com' }),
+  ) });
+  assert.deepEqual(capacityLines(page), [
+    ['Antigravity · a@example.com', 'Claude & GPT (shared): Weekly 70% left · resets in 2d', `Gemini Argon: ${RESET_DUE}`, "Gemini: — can't tell"],
+    ['Claude Max · b@example.com', 'Limited by Weekly · 50% left · resets in 3d · 1 reset awaiting confirmation'],
+    ['Claude Max · c@example.com', RESET_DUE, 'Opus: Weekly 60% left · resets in 2d'],
+  ]);
+  const text = tileText(page, 'capacity');
+  assert.ok(!text.includes('100%') && !text.includes(' 0% left'), text);
+});
+
+test('Capacity: a reading without `scope` (saved before it existed) still renders, scoped by its label', async () => {
+  const page = await renderQuotas(quotasOf(
+    account('claude:a', [win('5-hour', 30, 3 * 3600), win('Weekly', 50, 3 * DAY, WEEK), win('Weekly · Fable', 90, 2 * DAY, WEEK),
+      win('Extra usage · monthly', 95, 0, null, { resetsAt: null })]),
+    agy([win('Gemini · Weekly', 98.6, 4 * DAY, WEEK), win('Claude & GPT (shared) · Weekly', 54, 2 * DAY, WEEK)], { email: 'g@example.com' }),
+    account('openai:c', [win('5-hour', 20, 3 * 3600), win('Code review · 3-hour', 95, 3600, 3 * 3600)], { provider: 'openai', name: 'ChatGPT', email: 'c@example.com' }),
+    // An explicit null wins over the label.
+    account('claude:d', [win('5-hour', 30, 3 * 3600), win('Weekly · Opus', 90, 2 * DAY, WEEK, { scope: null })], { email: 'd@example.com' }),
+  ));
+  assert.deepEqual(capacityLines(page), [
+    ['Claude Max · a@example.com', 'Limited by Weekly · 50% left · resets in 3d', 'Extra usage: monthly 5% left · resets with billing cycle ⛔ Nearly out', 'Fable: Weekly 10% left · resets in 2d ⛔ Nearly out'],
+    ['Antigravity · g@example.com', 'Gemini: Weekly 1% left · resets in 4d ⛔ Nearly out', 'Claude & GPT (shared): Weekly 46% left · resets in 2d'],
+    ['ChatGPT Max · c@example.com', 'Limited by 5-hour · 80% left · resets in 3h', 'Code review: 3-hour 5% left · resets in 1h ⛔ Nearly out'],
+    ['Claude Max · d@example.com', 'Limited by Weekly · Opus · 10% left · resets in 2d ⛔ Nearly out'],
+  ]);
+});
+
+test('Capacity shows at most 3 scope lines, then +N more; the card lists them all', async () => {
+  const scopes = ['A', 'B', 'C', 'D', 'E'];
+  const page = await renderQuotas(quotasOf(agy(scopes.map((s, i) => scoped(s, 'Weekly', 50 + i * 10, 2 * DAY)))));
+  assert.deepEqual(capacityLines(page)[0], ['Antigravity · a@example.com',
+    'E: Weekly 10% left · resets in 2d ⛔ Nearly out', 'D: Weekly 20% left · resets in 2d ⚠ Low', 'C: Weekly 30% left · resets in 2d ⚠ Low', '+2 more']);
+  assert.equal(cardLimits(page.cards)[0].length, 5);
+  assert.ok(!cardLimits(page.cards)[0].some((l) => l.includes('more')));
+});
+
+test('Capacity and the card escape scope strings and never compare or rank accounts', async () => {
+  const evil = '<img src=x onerror=alert(1)>';
+  const page = await renderQuotas(quotasOf(
+    agy([win(`${evil} · Weekly`, 95, 2 * DAY, WEEK, { scope: evil })]),
+    account('claude:b', [win('Weekly', 99, 2 * DAY, WEEK)], { email: 'b@example.com' }),
+  ));
+  for (const out of [page.element('glance-capacity').innerHTML, page.cards]) {
+    assert.ok(!/<img[\s>]/.test(out), out);
+    assert.ok(out.includes('&lt;img src=x onerror=alert(1)&gt;:'), out);
+  }
+  assertClean(page.element('glance-capacity').innerHTML);
+  assert.ok(!/total|combined|use this|best|recommend/i.test(tileText(page, 'capacity')), tileText(page, 'capacity'));
+});
+
+test('fresh data clears reset-due: a new reading shows the provider’s figure again, including a genuine 0% used', async () => {
+  let quotas = quotasOf(account('claude:a', [win('5-hour', 62, -60), win('Weekly', 40, 3 * 86400, WEEK)]));
+  const page = await loadDashboard({ quotas, now: NOW, respond: (url) => (url.startsWith('/api/quotas') ? { ok: true, json: async () => quotas } : undefined) });
+  assert.ok(page.element('content').innerHTML.includes(RESET_DUE));
+  assert.ok(tileText(page, 'capacity').includes('1 reset awaiting confirmation'));
+
+  // The provider reports the new window: nothing used yet, resetting 5 hours from now.
+  quotas = quotasOf(account('claude:a', [win('5-hour', 0, FIVE_HOURS), win('Weekly', 40, 3 * 86400, WEEK)]));
+  page.timers.find((t) => t.ms === 20_000).fn();
+  await settle();
+  const [fresh] = winsOf(page.element('content').innerHTML);
+  assert.ok(fresh.includes('<span class="big">100%</span>') && fresh.includes('<div class="fill" style="width:100%"></div>'), fresh);
+  assert.ok(!page.element('content').innerHTML.includes('Reset due') && !page.element('content').innerHTML.includes('Refreshing'));
+  assert.equal(tileText(page, 'capacity'), 'Claude Max · a@example.com Limited by Weekly · 60% left · resets in 3d');
+  assert.equal(page.document.title, '60% · Quotas');
 });
 
 test('At a glance, owner-blocked: the attention total, its count per kind, and 🔥 when one is urgent', async () => {
@@ -1303,7 +1529,7 @@ test('At a glance, partially unavailable: each source failing on its own changes
   failing = '/api/quotas';
   await page.run('load()');
   const capacity = tileText(page, 'capacity');
-  assert.ok(capacity.startsWith('Claude Max · a@example.com Weekly 60% left · resets in 3d ◷ just now'), capacity);
+  assert.ok(capacity.startsWith('Claude Max · a@example.com Limited by Weekly · 60% left · resets in 3d ◷ just now'), capacity);
   assert.ok(capacity.endsWith("⚠ Couldn't refresh"), capacity);
   assert.equal(tileText(page, 'attention'), "✓ Nothing needs you ⚠ Couldn't refresh · ◷ 1m ago");
 
